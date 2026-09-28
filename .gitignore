@@ -1,0 +1,18 @@
+# Large local runtimes and generated game output
+assets/
+Godot_Engine/
+games/
+output/
+runs/
+.retired/
+
+# Pi source is a separate Git repository
+PiAgent/
+
+# Local secrets and caches
+.env
+.pi/
+.pi-local/
+node_modules/
+__pycache__/
+*.log
