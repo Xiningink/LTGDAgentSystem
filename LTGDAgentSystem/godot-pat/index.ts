@@ -3,12 +3,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { acceptPlan, completeSubtask, newTask, recordVerification, type Subtask, type TaskState, type Verification } from "./controller.ts";
+import { efficiencyInstruction } from "./efficiency.ts";
 import { verifyProject } from "./godot.ts";
 import { inspectProject, inspectScene } from "./project.ts";
 
 const workspace = path.resolve(import.meta.dirname, "../..");
 const runs = path.join(workspace, "runs");
 const godot = path.join(workspace, "Godot_Engine", "Godot_v4.6.2-stable_win64_console.exe");
+const efficiencyEnabled = process.env.LTGD_EFFICIENCY_PROMPT !== "off";
 
 function compact(result: Verification): string {
 	const lines = [`Godot ${result.status.toUpperCase()} at ${result.stage}; score ${result.score}/10.`];
@@ -81,7 +83,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 - Do not modify the shared assets/ or Godot_Engine/ directories.
 ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}` : ""}`;
 		const solved = state?.solved?.length ? `\nPreviously checked subtasks: ${state.solved.slice(-6).map((item) => `${item.id}: ${item.evidence}`).join("; ")}` : "";
-		return { systemPrompt: event.systemPrompt + prompt + solved };
+		return { systemPrompt: event.systemPrompt + prompt + solved + (efficiencyEnabled ? efficiencyInstruction(phase) : "") };
 	});
 
 	pi.on("tool_call", (event) => {
@@ -165,7 +167,7 @@ ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}`
 		const usage = event.message.usage;
 		if (!usage) return;
 		await fs.mkdir(runs, { recursive: true });
-		await fs.appendFile(path.join(runs, "usage.jsonl"), JSON.stringify({ at: new Date().toISOString(), phase: state?.phase, input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, cost: usage.cost.total }) + "\n");
+		await fs.appendFile(path.join(runs, "usage.jsonl"), JSON.stringify({ at: new Date().toISOString(), phase: state?.phase, efficiencyPrompt: efficiencyEnabled, provider: event.message.provider, model: event.message.responseModel ?? event.message.model, input: usage.input, output: usage.output, reasoning: usage.reasoning ?? null, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, cost: usage.cost.total }) + "\n");
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {

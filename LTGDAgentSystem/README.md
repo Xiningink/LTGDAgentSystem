@@ -14,3 +14,5 @@ cd games\system
 验证在系统临时目录复制项目，跳过 `.godot`、`.git`、`.pi` 和 `node_modules`；运行 Godot 导入与无头启动，然后删除副本。精简报告和原始日志保存在顶层 `runs/`。`PASS` 只代表导入与启动成功，**不代表玩法、视觉或需求全部通过**；这些仍需试玩或明确的任务检查。
 
 `/godot-status` 查看当前阶段及最近一次验证。`runs/usage.jsonl` 记录 Pi 轮次 Token 用量和成本。运行需要 `PiAgent/node_modules` 中已有的 `tsx` 以及顶层 `Godot_Engine/Godot_v4.6.2-stable_win64_console.exe`。
+
+默认启用精简推理提示：日常执行时减少重复分析和重复检查，修复或规划阶段仍要求充分诊断。它不会缩短代码、需求或必要验证。提示词效果尚需通过同类任务对照验证；在启动前设置 `LTGD_EFFICIENCY_PROMPT=off` 可关闭它，作为对照组。`runs/usage.jsonl` 同时记录模式、模型及提供方报告的 reasoning Token；`reasoning: null` 表示提供方未报告该项，且 reasoning 已包含在 `output` 中，不应重复加总。
