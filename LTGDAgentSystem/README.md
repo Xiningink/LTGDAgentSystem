@@ -15,4 +15,4 @@ cd games\system
 
 `/godot-status` 查看当前阶段及最近一次验证。`runs/usage.jsonl` 记录 Pi 轮次 Token 用量和成本。运行需要 `PiAgent/node_modules` 中已有的 `tsx` 以及顶层 `Godot_Engine/Godot_v4.6.2-stable_win64_console.exe`。
 
-默认只在生成阶段（`direct`、`execute_plan` 和可能仍在收尾的 `done`）启用精简推理提示，减少重复分析和重复检查；`repair`、`plan`、`stopped` 阶段不注入该提示，保留充分诊断空间。扩展在每次模型调用前按当前阶段决定是否注入，因此任务中途进入规划也会撤掉提示。它不会缩短代码、需求或必要验证。提示词效果尚需通过同类任务对照验证；在启动前设置 `LTGD_EFFICIENCY_PROMPT=off` 可关闭它，作为对照组。`runs/usage.jsonl` 同时记录每轮是否实际注入提示、模型及提供方报告的 reasoning Token；`reasoning: null` 表示提供方未报告该项，且 reasoning 已包含在 `output` 中，不应重复加总。
+默认只在生成阶段（`direct`、`execute_plan` 和可能仍在收尾的 `done`）启用精简推理提示，减少重复分析和重复检查；`repair`、`plan`、`stopped` 阶段不注入该提示，保留充分诊断空间。扩展在每次模型调用前按当前阶段决定是否注入，因此任务中途进入规划也会撤掉提示。提示只在当次请求的系统节中出现一次，不会逐轮追加到会话历史；模型请求仍会重传这段短提示。它不会缩短代码、需求或必要验证。提示词效果尚需通过同类任务对照验证；在启动前设置 `LTGD_EFFICIENCY_PROMPT=off` 可关闭它，作为对照组。`runs/usage.jsonl` 同时记录每轮是否实际注入提示、模型及提供方报告的 reasoning Token；`reasoning: null` 表示提供方未报告该项，且 reasoning 已包含在 `output` 中，不应重复加总。
