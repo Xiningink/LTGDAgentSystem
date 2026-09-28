@@ -34,6 +34,8 @@ export default function godotPat(pi: ExtensionAPI): void {
 	let state: TaskState | undefined;
 	let initialFingerprint = "";
 	let projectRoot = "";
+	let activeEfficiencyPrompt = false;
+	let activePromptPhase: TaskState["phase"] | null = null;
 
 	function persist(): void { if (state) pi.appendEntry("godot-pat-state", state); }
 	function restore(entries: readonly unknown[]): void {
@@ -83,7 +85,22 @@ export default function godotPat(pi: ExtensionAPI): void {
 - Do not modify the shared assets/ or Godot_Engine/ directories.
 ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}` : ""}`;
 		const solved = state?.solved?.length ? `\nPreviously checked subtasks: ${state.solved.slice(-6).map((item) => `${item.id}: ${item.evidence}`).join("; ")}` : "";
-		return { systemPrompt: event.systemPrompt + prompt + solved + (efficiencyEnabled ? efficiencyInstruction(phase) : "") };
+		return { systemPrompt: event.systemPrompt + prompt + solved };
+	});
+
+	pi.on("context_with_system", (event) => {
+		activePromptPhase = state?.phase ?? null;
+		const efficiency = efficiencyEnabled && activePromptPhase ? efficiencyInstruction(activePromptPhase) : "";
+		const leading = event.messages[0];
+		activeEfficiencyPrompt = efficiency.length > 0 && leading?.role === "system";
+		if (leading?.role !== "system") return;
+		if (!activeEfficiencyPrompt && !("ltgd_efficiency" in (leading.sections ?? {}))) return;
+		return {
+			messages: [
+				{ ...leading, sections: { ...leading.sections, ltgd_efficiency: activeEfficiencyPrompt ? efficiency : null } },
+				...event.messages.slice(1),
+			],
+		};
 	});
 
 	pi.on("tool_call", (event) => {
@@ -167,7 +184,7 @@ ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}`
 		const usage = event.message.usage;
 		if (!usage) return;
 		await fs.mkdir(runs, { recursive: true });
-		await fs.appendFile(path.join(runs, "usage.jsonl"), JSON.stringify({ at: new Date().toISOString(), phase: state?.phase, efficiencyPrompt: efficiencyEnabled, provider: event.message.provider, model: event.message.responseModel ?? event.message.model, input: usage.input, output: usage.output, reasoning: usage.reasoning ?? null, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, cost: usage.cost.total }) + "\n");
+		await fs.appendFile(path.join(runs, "usage.jsonl"), JSON.stringify({ at: new Date().toISOString(), phase: state?.phase, promptPhase: activePromptPhase, efficiencyPrompt: activeEfficiencyPrompt, provider: event.message.provider, model: event.message.responseModel ?? event.message.model, input: usage.input, output: usage.output, reasoning: usage.reasoning ?? null, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, cost: usage.cost.total }) + "\n");
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
