@@ -1,4 +1,4 @@
-export type Phase = "direct" | "repair" | "plan" | "execute_plan" | "done" | "stopped";
+export type Phase = "direct" | "repair" | "plan" | "execute_plan" | "verified" | "done" | "stopped";
 export type VerificationStatus = "pass" | "fail" | "infrastructure";
 
 export interface Failure {
@@ -25,6 +25,7 @@ export interface Subtask {
 }
 
 export interface TaskState {
+	schemaVersion: 2;
 	goal: string;
 	phase: Phase;
 	attempts: number;
@@ -36,22 +37,35 @@ export interface TaskState {
 	plan: Subtask[];
 	currentSubtask: number;
 	solved: { id: string; evidence: string; fingerprint: string }[];
+	completionEvidence?: string;
 }
 
 export function newTask(goal: string): TaskState {
-	return { goal, phase: "direct", attempts: 0, bestScore: -1, noProgress: 0, plan: [], currentSubtask: 0, solved: [] };
+	return { schemaVersion: 2, goal, phase: "direct", attempts: 0, bestScore: -1, noProgress: 0, plan: [], currentSubtask: 0, solved: [] };
+}
+
+export function restoreTaskState(data: unknown): TaskState | undefined {
+	if (typeof data !== "object" || data === null || !("phase" in data) || !("goal" in data)) return undefined;
+	const loaded = data as TaskState & { schemaVersion?: number };
+	if (loaded.schemaVersion === 2) return loaded;
+	if (loaded.schemaVersion !== undefined) return undefined;
+	return {
+		...loaded,
+		schemaVersion: 2,
+		phase: loaded.phase === "done" && !loaded.completionEvidence ? "verified" : loaded.phase,
+	};
 }
 
 export function recordVerification(state: TaskState, result: Verification): TaskState {
 	if (result.status === "infrastructure") return { ...state, lastVerification: result };
 	const attempts = state.attempts + 1;
 	if (result.status === "pass") {
-		return { ...state, phase: state.plan.length && state.currentSubtask < state.plan.length ? "execute_plan" : "done", attempts, lastVerification: result, lastFingerprint: result.fingerprint };
+		return { ...state, phase: state.plan.length && state.currentSubtask < state.plan.length ? "execute_plan" : "verified", attempts, noProgress: 0, lastFailure: undefined, lastVerification: result, lastFingerprint: result.fingerprint };
 	}
 	const signature = JSON.stringify(result.errors.map((error) => [error.stage, error.file, error.line, error.message]));
 	const improved = result.score > state.bestScore;
 	const noProgress = improved ? 0 : state.noProgress + 1;
-	let phase: Phase = state.phase === "direct" || state.phase === "done" ? "repair" : "plan";
+	let phase: Phase = state.phase === "direct" || state.phase === "verified" || state.phase === "done" ? "repair" : "plan";
 	if (state.phase === "plan") phase = "plan";
 	if (state.phase === "execute_plan") phase = "repair";
 	if ((state.lastFailure === signature && state.lastFingerprint === result.fingerprint) || noProgress >= 3 || attempts >= 6) {
@@ -91,8 +105,24 @@ export function completeSubtask(state: TaskState, evidence: string, fingerprint:
 	const currentSubtask = state.currentSubtask + 1;
 	return {
 		...state,
-		phase: currentSubtask === state.plan.length ? "done" : "execute_plan",
+		phase: currentSubtask === state.plan.length ? "verified" : "execute_plan",
 		currentSubtask,
 		solved: [...state.solved, { id: task.id, evidence: evidence.slice(0, 500), fingerprint }],
 	};
+}
+
+export function finishTask(state: TaskState, evidence: string, fingerprint: string): TaskState {
+	if (state.phase !== "verified" || state.currentSubtask !== state.plan.length) {
+		throw new Error("Complete and verify all planned subtasks before finishing the task.");
+	}
+	if (state.lastVerification?.status !== "pass" || state.lastVerification.fingerprint !== fingerprint) {
+		throw new Error("Verify the current files successfully before finishing the task.");
+	}
+	if (!evidence.trim()) throw new Error("Describe how the game requirements were checked.");
+	return { ...state, phase: "done", completionEvidence: evidence.trim().slice(0, 1000) };
+}
+
+export function shouldContinueAfterVerification(state: TaskState, result: Verification): boolean {
+	if (state.phase === "done" || state.phase === "stopped") return false;
+	return result.status === "fail" || (result.status === "pass" && state.phase === "execute_plan");
 }

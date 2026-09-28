@@ -2,8 +2,8 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { acceptPlan, completeSubtask, newTask, recordVerification, type Subtask, type TaskState, type Verification } from "./controller.ts";
-import { efficiencyInstruction } from "./efficiency.ts";
+import { acceptPlan, completeSubtask, finishTask, newTask, recordVerification, restoreTaskState, shouldContinueAfterVerification, type Subtask, type TaskState, type Verification } from "./controller.ts";
+import { efficiencyMode, isFullGameTask, withEfficiencyInstruction, type EfficiencyMode } from "./efficiency.ts";
 import { verifyProject } from "./godot.ts";
 import { inspectProject, inspectScene } from "./project.ts";
 
@@ -23,7 +23,9 @@ function compact(result: Verification): string {
 function nextInstruction(state: TaskState): string {
 	if (state.phase === "repair") return "Fix the listed failure with the smallest relevant change, then run godot_verify again.";
 	if (state.phase === "plan") return "Quick repair failed. Call godot_plan with 1-6 short ordered subtasks before editing further.";
-	if (state.phase === "stopped") return "Repeated failure or no progress: stop automatic retries and report the blocker to the user.";
+	if (state.phase === "stopped") return "Repeated failure or no progress: stop automatic retries and report the blocker to the user. Do not call more tools.";
+	if (state.phase === "done") return "Completion recorded. Give the user a final summary without more tool calls.";
+	if (state.phase === "verified") return "Godot import and boot passed. Check the remaining gameplay and visual requirements; call godot_finish only when all requirements have evidence.";
 	if (state.phase === "execute_plan") return state.lastVerification?.status === "pass"
 		? `Review requirement behavior for ${state.plan[state.currentSubtask]?.goal ?? state.goal}; call godot_subtask_done with concrete evidence to advance.`
 		: `Continue the current subtask: ${state.plan[state.currentSubtask]?.goal ?? state.goal}.`;
@@ -35,14 +37,16 @@ export default function godotPat(pi: ExtensionAPI): void {
 	let initialFingerprint = "";
 	let projectRoot = "";
 	let activeEfficiencyPrompt = false;
+	let activePolicyMode: EfficiencyMode = "none";
 	let activePromptPhase: TaskState["phase"] | null = null;
+	let firstModelRequest = false;
 
 	function persist(): void { if (state) pi.appendEntry("godot-pat-state", state); }
 	function restore(entries: readonly unknown[]): void {
 		state = undefined;
 		for (const entry of entries) {
 			if (typeof entry === "object" && entry !== null && "type" in entry && entry.type === "custom" && "customType" in entry && entry.customType === "godot-pat-state" && "data" in entry) {
-				state = entry.data as TaskState;
+				state = restoreTaskState(entry.data);
 			}
 		}
 	}
@@ -55,14 +59,16 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		projectRoot = path.resolve(ctx.cwd);
+		firstModelRequest = false;
 		restore(ctx.sessionManager.getBranch());
 	});
-	pi.on("session_tree", (_event, ctx) => restore(ctx.sessionManager.getBranch()));
+	pi.on("session_tree", (_event, ctx) => { firstModelRequest = false; restore(ctx.sessionManager.getBranch()); });
 
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension" || !event.text.trim()) return;
 		projectRoot = path.resolve(ctx.cwd);
 		state = newTask(event.text.trim());
+		firstModelRequest = true;
 		initialFingerprint = (await inspectProject(projectRoot)).fingerprint;
 		persist();
 	});
@@ -71,16 +77,18 @@ export default function godotPat(pi: ExtensionAPI): void {
 		if (!state && event.prompt.trim()) {
 			projectRoot = path.resolve(ctx.cwd);
 			state = newTask(event.prompt.trim());
+			firstModelRequest = true;
 			initialFingerprint = (await inspectProject(projectRoot)).fingerprint;
 			persist();
 		}
 		const phase = state?.phase ?? "direct";
-		const large = state ? state.goal.length > 180 || /(?:完整.*游戏|制作.*游戏|开发.*游戏|build.*game|create.*game)/i.test(state.goal) : false;
+		const large = state ? isFullGameTask(state.goal) : false;
 		const prompt = `\n\nLTGD Godot workflow (current phase: ${phase}):
 - Work on the Godot project in the current directory. Keep the user's Pi conversation as the entry point.
 - ${large ? "This is a large task: make a short 3-7 item milestone sketch, then implement one milestone at a time." : "This is a local task: edit directly without a separate plan."}
 - Use godot_inspect_project and godot_inspect_scene for concise context. Read raw files only for edits.
 - Before claiming a game change is complete, call godot_verify. A passing check proves import and headless boot only; assess gameplay requirements separately.
+- Once the current files pass verification and all requirements have concrete checking evidence, call godot_finish before claiming completion.
 - On first failure, repair the specific error. On a failed repair, call godot_plan before further edits. Stop at repeated unchanged failures.
 - Do not modify the shared assets/ or Godot_Engine/ directories.
 ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}` : ""}`;
@@ -90,20 +98,19 @@ ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}`
 
 	pi.on("context_with_system", (event) => {
 		activePromptPhase = state?.phase ?? null;
-		const efficiency = efficiencyEnabled && activePromptPhase ? efficiencyInstruction(activePromptPhase) : "";
-		const leading = event.messages[0];
-		activeEfficiencyPrompt = efficiency.length > 0 && leading?.role === "system";
-		if (leading?.role !== "system") return;
-		if (!activeEfficiencyPrompt && !("ltgd_efficiency" in (leading.sections ?? {}))) return;
-		return {
-			messages: [
-				{ ...leading, sections: { ...leading.sections, ltgd_efficiency: activeEfficiencyPrompt ? efficiency : null } },
-				...event.messages.slice(1),
-			],
-		};
+		const firstFullGameRequest = firstModelRequest && activePromptPhase === "direct" && !!state && isFullGameTask(state.goal);
+		firstModelRequest = false;
+		const requestedMode = efficiencyMode(activePromptPhase, firstFullGameRequest, efficiencyEnabled);
+		const messages = withEfficiencyInstruction(event.messages, requestedMode);
+		activePolicyMode = messages && requestedMode !== "none" ? requestedMode : "none";
+		activeEfficiencyPrompt = activePolicyMode !== "none";
+		return messages ? { messages } : undefined;
 	});
 
 	pi.on("tool_call", (event) => {
+		if (state?.phase === "done" || state?.phase === "stopped") {
+			return { block: true, reason: nextInstruction(state) };
+		}
 		if (state?.phase === "plan" && ["write", "edit", "bash", "powershell"].includes(event.toolName)) {
 			return { block: true, reason: "Planner phase is read-only. Call godot_plan with a concise ordered plan first." };
 		}
@@ -170,7 +177,21 @@ ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}`
 			state = completeSubtask(state, params.evidence, current.fingerprint);
 			persist();
 			const next = state.plan[state.currentSubtask];
-			return { content: [{ type: "text", text: next ? `Subtask recorded. Next: ${next.id} ${next.goal}` : "All planned subtasks recorded. Review the full game and report any unverified gameplay or visual requirements." }], details: {} };
+			return { content: [{ type: "text", text: next ? `Subtask recorded. Next: ${next.id} ${next.goal}` : "All planned subtasks recorded. Review the full game requirements; call godot_finish only when each has checking evidence." }], details: {} };
+		},
+	});
+
+	pi.registerTool({
+		name: "godot_finish", label: "Finish Godot task",
+		description: "Record final completion only after current files pass Godot verification and all planned subtasks and game requirements have been checked.",
+		parameters: Type.Object({ evidence: Type.String({ description: "Concrete evidence for checked gameplay and visual requirements, beyond import and boot" }) }),
+		executionMode: "sequential",
+		async execute(_id, params, _signal, _update, ctx) {
+			if (!state) throw new Error("No active task.");
+			const current = await inspectProject(path.resolve(ctx.cwd));
+			state = finishTask(state, params.evidence, current.fingerprint);
+			persist();
+			return { content: [{ type: "text", text: `Completion recorded: ${state.completionEvidence}. Summarize the result to the user without more tool calls.` }], details: {} };
 		},
 	});
 
@@ -184,20 +205,18 @@ ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}`
 		const usage = event.message.usage;
 		if (!usage) return;
 		await fs.mkdir(runs, { recursive: true });
-		await fs.appendFile(path.join(runs, "usage.jsonl"), JSON.stringify({ at: new Date().toISOString(), phase: state?.phase, promptPhase: activePromptPhase, efficiencyPrompt: activeEfficiencyPrompt, provider: event.message.provider, model: event.message.responseModel ?? event.message.model, input: usage.input, output: usage.output, reasoning: usage.reasoning ?? null, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, cost: usage.cost.total }) + "\n");
+		await fs.appendFile(path.join(runs, "usage.jsonl"), JSON.stringify({ at: new Date().toISOString(), phase: state?.phase, promptPhase: activePromptPhase, policyMode: activePolicyMode, efficiencyPrompt: activeEfficiencyPrompt, provider: event.message.provider, model: event.message.responseModel ?? event.message.model, input: usage.input, output: usage.output, reasoning: usage.reasoning ?? null, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, cost: usage.cost.total }) + "\n");
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
-		if (!state || state.phase === "stopped" || !projectRoot) return;
+		if (!state || state.phase === "done" || state.phase === "stopped" || !projectRoot) return;
 		const current = await inspectProject(projectRoot);
 		if (current.fingerprint === initialFingerprint || current.fingerprint === state.lastVerification?.fingerprint) return;
 		const result = await verify(projectRoot);
-		if (result.status === "fail" && (state as TaskState).phase !== "stopped") {
-			pi.sendMessage({ customType: "godot-pat-feedback", content: `${compact(result)}\n${nextInstruction(state)}`, display: true }, { triggerTurn: true, deliverAs: "followUp" });
-		} else if (result.status === "pass" && state.phase === "execute_plan") {
+		if (shouldContinueAfterVerification(state, result)) {
 			pi.sendMessage({ customType: "godot-pat-feedback", content: `${compact(result)}\n${nextInstruction(state)}`, display: true }, { triggerTurn: true, deliverAs: "followUp" });
 		} else {
-			pi.sendMessage({ customType: "godot-pat-feedback", content: compact(result), display: true }, { triggerTurn: false });
+			pi.sendMessage({ customType: "godot-pat-feedback", content: `${compact(result)}\n${nextInstruction(state)}`, display: true }, { triggerTurn: false });
 		}
 	});
 }
