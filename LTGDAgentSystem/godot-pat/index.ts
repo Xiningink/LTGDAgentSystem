@@ -217,11 +217,12 @@ export default function godotPat(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event) => {
 		if (event.prompt.trim() && (!state?.projectPath || state.phase === "done" || state.phase === "stopped")) latestUserRequest = event.prompt.trim();
 		if (!state?.projectPath || state.phase === "done" || state.phase === "stopped") {
-			return { systemPrompt: event.systemPrompt + "\n\nIf the user requests Godot game development with LTGD, call godot_set_project to activate the workflow. Include task specification files in specification_files; the Controller extracts the requirement list before generation. For other tasks, leave LTGD tools unused." };
+			return { systemPrompt: event.systemPrompt + "\n\nIf the user requests Godot game development with LTGD, call godot_set_project to activate the workflow. Include task specification files in specification_files; the Controller extracts the requirement list before generation. When choosing shared assets, inspect relevant directory names first and use only paths confirmed by that listing. For other tasks, leave LTGD tools unused." };
 		}
 		return { systemPrompt: event.systemPrompt + `\n\nFor the selected LTGD Godot game, follow this workflow:
 - You are the Generator. Keep Pi's current directory. The selected project is ${state.projectPath}.
 - Use godot_inspect_project and godot_inspect_scene for concise context. Read raw files only for edits. Keep all project files inside the selected directory.
+- For shared assets, inspect only directories relevant to the game's needs. Use paths confirmed by actual listings; do not guess pack locations. Once enough assets are chosen, stop browsing and build the game.
 - After completing the current workset, call godot_verify with a completed/unresolved evidence report for every active ID. Only an actual Godot verification failure lets the Controller call the isolated Planner. You cannot request planning yourself. Implement the whole resulting plan before verifying again.
 - Work only on the original requirements, confirmed missing requirements, or the current Godot repair plan. Do not add optional goals.
 - When no authorized workset item remains unmet, submit the whole workset to godot_verify immediately. Do not start an open-ended polish or inspection pass.
