@@ -1,12 +1,8 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { TextDecoder } from "node:util";
 import type { Failure, Verification } from "./controller.ts";
 import { inspectProject } from "./project.ts";
-
-const EXCLUDED = new Set([".git", ".godot", ".pi", ".pi-godot", "node_modules"]);
 
 export interface VerifyOptions {
 	project: string;
@@ -119,40 +115,24 @@ export async function verifyProject(options: VerifyOptions): Promise<Verificatio
 	} catch {
 		return { ...base, status: "infrastructure", stage: "godot", errors: [{ stage: "godot", message: `Godot executable not found: ${options.godot}` }] };
 	}
-	const temp = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-verify-"));
-	try {
-		const sandbox = path.join(temp, "project");
-		await fs.cp(options.project, sandbox, {
-			recursive: true,
-			filter: async (source) => {
-				const relative = path.relative(options.project, source);
-				if (relative.split(path.sep).some((part) => EXCLUDED.has(part))) return false;
-				return !(await fs.lstat(source)).isSymbolicLink();
-			},
-		});
-		const editor = await runCommand(options.godot, ["--headless", "--path", sandbox, "--editor", "--quit"], 60_000, "import", options.signal);
-		if (editor.error || editor.timedOut) {
-			return { ...base, status: "infrastructure", stage: "import", errors: [{ stage: "import", message: editor.error ?? "Godot import timed out." }] };
-		}
-		const importErrors = editor.errors;
-		if (editor.exitCode !== 0 || importErrors.length) {
-			return { ...base, stage: "import", errors: importErrors.length ? importErrors : [exitFailure("import", editor)] };
-		}
-		base.score = 5;
-		if (options.runGame !== false) {
-			const game = await runCommand(options.godot, ["--headless", "--path", sandbox, "--quit-after", "60"], 25_000, "runtime", options.signal);
-			if (game.error || game.timedOut) {
-				return { ...base, status: "infrastructure", stage: "runtime", errors: [{ stage: "runtime", message: game.error ?? "Godot runtime timed out." }] };
-			}
-			const runtimeErrors = game.errors;
-			if (game.exitCode !== 0 || runtimeErrors.length) {
-				return { ...base, stage: "runtime", errors: runtimeErrors.length ? runtimeErrors : [exitFailure("runtime", game)] };
-			}
-		}
-		return { ...base, status: "pass", stage: options.runGame === false ? "import" : "runtime", score: options.runGame === false ? 5 : 10 };
-	} catch (error) {
-		return { ...base, status: "infrastructure", stage: "copy", errors: [{ stage: "copy", message: error instanceof Error ? error.message : String(error) }] };
-	} finally {
-		await fs.rm(temp, { recursive: true, force: true });
+	const editor = await runCommand(options.godot, ["--headless", "--path", options.project, "--editor", "--quit"], 60_000, "import", options.signal);
+	if (editor.error || editor.timedOut) {
+		return { ...base, status: "infrastructure", stage: "import", errors: [{ stage: "import", message: editor.error ?? "Godot import timed out." }] };
 	}
+	const importErrors = editor.errors;
+	if (editor.exitCode !== 0 || importErrors.length) {
+		return { ...base, stage: "import", errors: importErrors.length ? importErrors : [exitFailure("import", editor)] };
+	}
+	base.score = 5;
+	if (options.runGame !== false) {
+		const game = await runCommand(options.godot, ["--headless", "--path", options.project, "--quit-after", "60"], 25_000, "runtime", options.signal);
+		if (game.error || game.timedOut) {
+			return { ...base, status: "infrastructure", stage: "runtime", errors: [{ stage: "runtime", message: game.error ?? "Godot runtime timed out." }] };
+		}
+		const runtimeErrors = game.errors;
+		if (game.exitCode !== 0 || runtimeErrors.length) {
+			return { ...base, stage: "runtime", errors: runtimeErrors.length ? runtimeErrors : [exitFailure("runtime", game)] };
+		}
+	}
+	return { ...base, status: "pass", stage: options.runGame === false ? "import" : "runtime", score: options.runGame === false ? 5 : 10 };
 }

@@ -279,7 +279,7 @@ test("failed verification calls a short-context Planner and hands its whole plan
 	}
 });
 
-test("scene inspection and Godot verification use a disposable project", async () => {
+test("scene inspection and Godot verification run in the selected project", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-test-"));
 	const project = path.join(root, "game");
 	await fs.mkdir(project);
@@ -291,7 +291,7 @@ test("scene inspection and Godot verification use a disposable project", async (
 	const pass = await verifyProject({ project, godot });
 	assert.equal(pass.status, "pass", JSON.stringify(pass));
 	assert.equal((await inspectProject(project)).fingerprint, before.fingerprint);
-	assert.equal((await fs.readdir(project)).includes(".godot"), false);
+	assert.equal((await fs.stat(path.join(project, ".godot"))).isDirectory(), true, "Godot import should write its cache in the selected project");
 	await fs.writeFile(path.join(project, "Main.tscn"), '[gd_scene format=3]\n\n[node name="Main" type="Node"\n');
 	const fail = await verifyProject({ project, godot });
 	assert.equal(fail.status, "fail", JSON.stringify(fail));

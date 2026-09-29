@@ -14,6 +14,6 @@ Planner 是一次独立模型请求，不共享 Generator 的长对话。它接�
 
 验证通过后进入 `review`，对照原始需求；当前工程指纹仍与成功验证时一致且提交了非空需求检查证据，`godot_finish` 才把任务记为 `done`。此处的“通过”仅指 Godot 导入与启动。状态使用 `schemaVersion: 3`；旧会话的无证据 `done` 恢复为 `review`，新版 `done` 保持完成。
 
-验证在系统临时目录复制项目，跳过 `.godot`、`.git`、`.pi` 和 `node_modules`；运行 Godot 导入与无头启动，然后删除副本。Verification 结果返回给 Pi 并保存在任务状态中，不创建 `runs/` 报告或日志。`godot_verify` 的简短结果只显示部分错误并标明总数；`godot_get_errors` 可读取本次保存的全部错误，Planner 也接收全部不同错误。若 Godot 非零退出却没有识别出的错误，结果会附带末尾输出用于诊断。`PASS` 只代表导入与启动成功，**不代表玩法、视觉或需求全部通过**；这些仍需试玩或明确的任务检查。`godot_finish` 的需求检查证据由模型提交，无法代替真人试玩。
+验证直接在选定的游戏目录运行 Godot 导入与无头启动；Godot 可能在该目录生成 `.godot` 导入缓存。Verification 结果返回给 Pi 并保存在任务状态中，不创建 `runs/` 报告或日志。`godot_verify` 的简短结果只显示部分错误并标明总数；`godot_get_errors` 可读取本次保存的全部错误，Planner 也接收全部不同错误。若 Godot 非零退出却没有识别出的错误，结果会附带末尾输出用于诊断。`PASS` 只代表导入与启动成功，**不代表玩法、视觉或需求全部通过**；这些仍需试玩或明确的任务检查。`godot_finish` 的需求检查证据由模型提交，无法代替真人试玩。
 
 `/godot-status` 查看当前阶段及最近一次验证。运行需要 `PiAgent/node_modules` 中已有的 `tsx` 以及顶层 `Godot_Engine/Godot_v4.6.2-stable_win64_console.exe`。

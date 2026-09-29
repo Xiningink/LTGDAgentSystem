@@ -210,7 +210,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "godot_verify", label: "Verify Godot project",
-		description: "Import and boot a disposable project copy. On failure, automatically request a short-context plan. Optionally report completed planned subtasks in this same call.",
+		description: "Import and boot the selected project in place. On failure, automatically request a short-context plan. Optionally report completed planned subtasks in this same call.",
 		parameters: Type.Object({ completed_subtasks: Type.Optional(Type.Array(Type.Object({ id: Type.String(), evidence: Type.String() }))) }), executionMode: "sequential",
 		async execute(_id, params, signal, _update, ctx) {
 			if (!(await hasProjectFile(projectRoot))) throw new Error(`No project.godot in ${projectRoot || "a selected directory"}. Select or create the project first.`);
