@@ -25,9 +25,7 @@ export interface Subtask {
 }
 
 export interface TaskState {
-	schemaVersion: 2;
 	goal: string;
-	projectPath?: string;
 	phase: Phase;
 	attempts: number;
 	bestScore: number;
@@ -41,19 +39,7 @@ export interface TaskState {
 }
 
 export function newTask(goal: string): TaskState {
-	return { schemaVersion: 2, goal, phase: "direct", attempts: 0, bestScore: -1, noProgress: 0, plan: [], currentSubtask: 0, solved: [] };
-}
-
-export function restoreTaskState(data: unknown): TaskState | undefined {
-	if (typeof data !== "object" || data === null || !("phase" in data) || !("goal" in data)) return undefined;
-	const loaded = data as Omit<TaskState, "phase" | "schemaVersion"> & { phase: Phase | "verified"; schemaVersion?: number };
-	if (loaded.schemaVersion === 2) return { ...loaded, schemaVersion: 2, phase: loaded.phase === "verified" ? "done" : loaded.phase };
-	if (loaded.schemaVersion !== undefined) return undefined;
-	return {
-		...loaded,
-		schemaVersion: 2,
-		phase: loaded.phase === "verified" ? "done" : loaded.phase,
-	};
+	return { goal, phase: "direct", attempts: 0, bestScore: -1, noProgress: 0, plan: [], currentSubtask: 0, solved: [] };
 }
 
 export function recordVerification(state: TaskState, result: Verification): TaskState {
@@ -109,9 +95,4 @@ export function completeSubtask(state: TaskState, evidence: string, fingerprint:
 		currentSubtask,
 		solved: [...state.solved, { id: task.id, evidence: evidence.slice(0, 500), fingerprint }],
 	};
-}
-
-export function shouldContinueAfterVerification(state: TaskState, result: Verification): boolean {
-	if (state.phase === "done" || state.phase === "stopped") return false;
-	return result.status === "fail" || (result.status === "pass" && state.phase === "execute_plan");
 }

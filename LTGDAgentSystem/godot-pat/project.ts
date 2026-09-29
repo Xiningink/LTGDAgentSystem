@@ -14,11 +14,6 @@ export interface ProjectIndex {
 	fingerprint: string;
 }
 
-export function resolveProjectDirectory(cwd: string, requested: string): string {
-	if (!requested.trim()) throw new Error("Project path cannot be empty.");
-	return path.resolve(cwd, requested.trim());
-}
-
 export async function listProjectFiles(root: string): Promise<string[]> {
 	const files: string[] = [];
 	async function visit(dir: string): Promise<void> {

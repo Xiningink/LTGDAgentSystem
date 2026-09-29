@@ -56,40 +56,41 @@ Copy what you need into your project's `assets/` folder.
 
 ## Project layout
 
-The LTGD launcher keeps Pi's current working directory. Build directly in an
-explicit project or delivery directory from the user's request; otherwise use
-Pi's current directory as the game project. Relative project paths start from
-Pi's current directory. From the repository root, the Godot console is at
+The LTGD launcher normally starts Pi in `games/system/`. This is the default
+writable game project directory. If Pi starts in another project directory, use
+that current directory instead; an explicit project or delivery path in the
+user's request takes precedence. Paths in this section are relative to the
+repository root. The Godot console is at
 `Godot_Engine/Godot_v4.6.2-stable_win64_console.exe`.
 
 ```
-./    (selected game project directory)
+games/system/    (default project directory)
   project.godot
   Main.tscn
   demo_outputs/    ← your input traces (1–10 files)
   scripts/  scenes/  assets/
 ```
 
-From the repository root, set `$projectDir` to the actual game project directory
-and confirm that it launches cleanly. Use the user's specified path when given:
+From the repository root, the default project must launch cleanly with the
+following PowerShell command. If the user specified another project or delivery
+path, use that path after `--path`:
 
 ```powershell
-$projectDir = (Get-Location).Path  # replace with the explicit project path when given
-& .\Godot_Engine\Godot_v4.6.2-stable_win64_console.exe --headless --path $projectDir --quit-after 5
+& .\Godot_Engine\Godot_v4.6.2-stable_win64_console.exe --headless --path .\games\system --quit-after 5
 ```
 
 Use the Godot 4 command-line documentation for engine flags.
 **Engine flags like `--headless` and `--quit-after N` must come BEFORE `--`** —
 anything after `--` is forwarded to the project as user args and silently
 ignored by the engine. Correct shape:
-`& .\Godot_Engine\Godot_v4.6.2-stable_win64_console.exe --headless --quit-after 5 --path $projectDir -- --scenario near_victory`.
+`& .\Godot_Engine\Godot_v4.6.2-stable_win64_console.exe --headless --quit-after 5 --path .\games\system -- --scenario near_victory`.
 
 The Linux screenshot helper is not available in this Windows workflow. Inspect visuals in the Godot editor during manual playtesting.
 
 ## Demos
 
-Ship **1–10 input-trace files** under the project's `demo_outputs/` directory,
-one per demo, each named `*.json`.
+Ship **1–10 input-trace files** under the project's `demo_outputs/` directory
+(`games/system/demo_outputs/` by default), one per demo, each named `*.json`.
 The local GameEva replayer launches a fresh game per trace and replays
 synthetic mouse and keyboard input at 1280×720. It saves replay logs, but
 does not capture or score video. Only the first 10 traces by filename are
@@ -104,7 +105,7 @@ Demo playback must be deterministic. For demos that need a specific state
 setup), define named scenarios your game loads when launched with:
 
 ```powershell
-& .\Godot_Engine\Godot_v4.6.2-stable_win64_console.exe --path $projectDir -- --scenario <id>
+& .\Godot_Engine\Godot_v4.6.2-stable_win64_console.exe --path .\games\system -- --scenario <id>
 ```
 
 When `--scenario <id>` is present the game must skip menus, set up the named
