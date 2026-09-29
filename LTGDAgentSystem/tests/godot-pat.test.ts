@@ -50,24 +50,63 @@ async function temporaryRoot(prefix: string, run: (root: string) => Promise<void
 	}
 }
 
-test("Pi request selects a project without a generated requirement list", async () => temporaryRoot("ltgd-select-", async (root) => {
-	const app = harness(root);
+test("Pi prompt activates LTGD and discovers the user-requested project without a setup tool", async () => temporaryRoot("ltgd-select-", async (root) => {
+	const app = harness(root, undefined, [{ status: "implemented", evidence: "Main scene exists" }]);
 	app.event("session_start", {});
+	assert.equal(app.tools.has("godot_set_project"), false);
 	assert.equal(app.event("tool_call", { toolName: "bash" }), undefined);
-	const unrelated = app.event("before_agent_start", { prompt: "List notes", systemPrompt: "BASE" }) as { systemPrompt: string };
-	assert.match(unrelated.systemPrompt, /For other tasks, leave LTGD tools unused/);
-	const select = app.tools.get("godot_set_project")!;
-	assert.ok(!Object.hasOwn(select.parameters.properties ?? {}, "requirements"));
 	app.event("input", { source: "user", text: "Build a game in output/AS/Signal" });
-	await select.execute("select", { project: "output/AS/Signal" }, undefined, undefined, app.ctx);
-	assert.equal(app.entries.at(-1)?.projectPath, path.join(root, "output", "AS", "Signal"));
+	const prompt = app.event("before_agent_start", { prompt: "Build a game in output/AS/Signal", systemPrompt: "BASE" }) as { systemPrompt: string };
+	assert.match(prompt.systemPrompt, /Executor locates that project automatically/);
 	assert.equal(app.entries.at(-1)?.goal, "Build a game in output/AS/Signal");
-	await select.execute("repeat", {}, undefined, undefined, app.ctx);
-	assert.equal(app.entries.length, 1);
-	await assert.rejects(() => select.execute("premature", { new_task: true }, undefined, undefined, app.ctx), /new user request/);
-	app.event("input", { source: "user", text: "Start another game" });
-	await select.execute("new", { new_task: true }, undefined, undefined, app.ctx);
-	assert.equal(app.entries.at(-1)?.projectPath, path.join(root, "game"));
+	assert.equal(app.entries.at(-1)?.projectPath, undefined);
+	const project = path.join(root, "output", "AS", "Signal");
+	await fs.mkdir(project, { recursive: true });
+	await fs.writeFile(path.join(project, "project.godot"), 'config_version=5\n[application]\nrun/main_scene="res://Main.tscn"\n');
+	await fs.writeFile(path.join(project, "Main.tscn"), '[gd_scene format=3]\n[node name="Main" type="Node"]\n');
+	const result = await app.settle();
+	assert.equal(result?.continue, false);
+	assert.equal(app.entries.at(-1)?.projectPath, project);
+	assert.equal(app.entries.at(-1)?.phase, "done");
+	assert.equal(JSON.parse(app.requests[0].input).project_directory, project);
+}));
+
+test("Project discovery reports absent or ambiguous output instead of selecting an old game", async () => temporaryRoot("ltgd-discovery-", async (root) => {
+	const absent = harness(root);
+	absent.event("session_start", {});
+	absent.event("before_agent_start", { prompt: "Build a Godot game", systemPrompt: "BASE" });
+	const noProject = await absent.settle();
+	assert.match(noProject?.entries.at(-1)?.content ?? "", /No project.godot/);
+	assert.equal(absent.entries.at(-1)?.phase, "stopped");
+	for (const name of ["First", "Second"]) {
+		const directory = path.join(root, name);
+		await fs.mkdir(directory);
+		await fs.writeFile(path.join(directory, "project.godot"), "config_version=5\n");
+	}
+	const ambiguous = harness(root);
+	ambiguous.event("session_start", {});
+	ambiguous.event("before_agent_start", { prompt: "Build a Godot game", systemPrompt: "BASE" });
+	const manyProjects = await ambiguous.settle();
+	assert.match(manyProjects?.entries.at(-1)?.content ?? "", /multiple Godot projects/);
+	assert.equal(ambiguous.entries.at(-1)?.phase, "stopped");
+}));
+
+test("Project discovery can use an absolute output directory outside Pi cwd", async () => temporaryRoot("ltgd-external-", async (root) => {
+	const cwd = path.join(root, "work");
+	const project = path.join(root, "outside");
+	await fs.mkdir(cwd);
+	await fs.mkdir(project);
+	const unrelated = path.join(cwd, "old-game");
+	await fs.mkdir(unrelated);
+	await fs.writeFile(path.join(unrelated, "project.godot"), "config_version=5\n");
+	await fs.writeFile(path.join(project, "project.godot"), 'config_version=5\n[application]\nrun/main_scene="res://Main.tscn"\n');
+	await fs.writeFile(path.join(project, "Main.tscn"), '[gd_scene format=3]\n[node name="Main" type="Node"]\n');
+	const app = harness(cwd, undefined, [{ status: "implemented", evidence: "Main.tscn" }]);
+	app.event("session_start", {});
+	app.event("before_agent_start", { prompt: `Build a Godot game in "${project}"`, systemPrompt: "BASE" });
+	await app.settle();
+	assert.equal(app.entries.at(-1)?.projectPath, project);
+	assert.equal(app.entries.at(-1)?.phase, "done");
 }));
 
 test("Controller only plans confirmed failures and completes after review", () => {
@@ -137,27 +176,30 @@ test("Executor reviews task files as one original request", async () => temporar
 }));
 
 test("Generator handoff runs Godot, then review, and plans only observed failures", async () => temporaryRoot("ltgd-loop-", async (root) => {
-	await fs.writeFile(path.join(root, "project.godot"), 'config_version=5\n[application]\nrun/main_scene="res://Main.tscn"\n');
+	const project = path.join(root, "game");
+	await fs.mkdir(project);
+	await fs.writeFile(path.join(project, "project.godot"), 'config_version=5\n[application]\nrun/main_scene="res://Main.tscn"\n');
 	const repair = { decision: "revise", reason: "Repair latest failure", subtasks: [{ problem: "Confirmed failure", goal: "Repair that failure" }] };
-	const app = harness(root, { ...newTask("Build a game with signal scanning"), projectPath: root }, [
+	const app = harness(root, undefined, [
 		repair,
 		{ status: "missing", evidence: "The scanning interaction is absent" },
 		repair,
 		{ status: "implemented", evidence: "Game.gd implements scan()" },
 	]);
 	app.event("session_start", {});
+	app.event("before_agent_start", { prompt: "Build a game with signal scanning", systemPrompt: "BASE" });
 	assert.equal(await app.event("agent_before_settle", { outcome: "aborted", entries: [] }), undefined);
 	const first = await app.settle();
 	assert.equal(first?.continue, true);
 	assert.match(first?.entries.at(-1)?.content ?? "", /Godot FAIL/);
 	assert.equal(app.requests[0].systemPrompt, PLANNER_SYSTEM_PROMPT);
-	await fs.writeFile(path.join(root, "Main.tscn"), '[gd_scene format=3]\n[node name="Main" type="Node"]\n');
+	await fs.writeFile(path.join(project, "Main.tscn"), '[gd_scene format=3]\n[node name="Main" type="Node"]\n');
 	const second = await app.settle();
 	assert.equal(second?.continue, true);
 	assert.match(second?.entries.at(-1)?.content ?? "", /missing original requirement/);
 	assert.equal(app.requests[1].systemPrompt, REVIEW_SYSTEM_PROMPT);
 	assert.equal(app.requests[2].systemPrompt, PLANNER_SYSTEM_PROMPT);
-	await fs.writeFile(path.join(root, "Game.gd"), "extends Node\nfunc scan():\n\tpass\n");
+	await fs.writeFile(path.join(project, "Game.gd"), "extends Node\nfunc scan():\n\tpass\n");
 	const third = await app.settle();
 	assert.equal(third?.continue, false);
 	assert.equal(app.entries.at(-1)?.phase, "done");

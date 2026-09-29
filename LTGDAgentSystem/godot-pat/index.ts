@@ -21,6 +21,30 @@ async function hasProjectFile(root: string): Promise<boolean> {
 	}
 }
 
+async function findProjectRoots(cwd: string, goal: string): Promise<string[]> {
+	const roots = new Set<string>();
+	const mentionedRoots = new Set<string>();
+	const skip = new Set([".git", ".godot", ".pi", ".pi-godot", "node_modules", "assets", "Godot_Engine", "tasks", "reports", "PiAgent"]);
+	async function visit(directory: string): Promise<void> {
+		let entries;
+		try { entries = await fs.readdir(directory, { withFileTypes: true }); }
+		catch { return; }
+		for (const entry of entries) {
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isFile() && entry.name === "project.godot") roots.add(directory);
+			else if (entry.isDirectory() && !skip.has(entry.name)) await visit(path.join(directory, entry.name));
+		}
+	}
+	await visit(cwd);
+	const mentionedPaths = [...goal.matchAll(/["'“]([^"'”]*[\\/][^"'”]*)["'”]|((?:[A-Za-z]:[\\/]|\.{1,2}[\\/])[^\s"'“”]+)/g)]
+		.map((match) => match[1] ?? match[2]);
+	for (const candidate of mentionedPaths) {
+		const directory = path.resolve(cwd, candidate.replace(/[，。,:;）)\]]+$/u, ""));
+		if (!/\.(?:md|txt|toml)$/i.test(directory) && await hasProjectFile(directory)) mentionedRoots.add(directory);
+	}
+	return mentionedRoots.size ? [...mentionedRoots] : [...roots];
+}
+
 function compact(result: Verification): string {
 	const lines = [`Godot ${result.status.toUpperCase()} at ${result.stage}.`];
 	for (const error of result.errors.slice(0, 6)) lines.push(`- ${error.file ?? error.stage}${error.line ? `:${error.line}` : ""}: ${error.message}`);
@@ -40,7 +64,6 @@ function nextInstruction(state: TaskState): string {
 export default function godotPat(pi: ExtensionAPI): void {
 	let state: TaskState | undefined;
 	let projectRoot = "";
-	let latestUserRequest = "";
 	let inputRevision = 0;
 	let selectedInputRevision = 0;
 
@@ -71,6 +94,15 @@ export default function godotPat(pi: ExtensionAPI): void {
 				};
 			}
 		}
+	}
+	async function bindProject(cwd: string): Promise<void> {
+		if (!state) throw new Error("No active LTGD game task.");
+		if (await hasProjectFile(projectRoot)) return;
+		const roots = await findProjectRoots(cwd, state.goal);
+		if (roots.length !== 1) throw new Error(roots.length ? `Found multiple Godot projects: ${roots.join("; ")}. Keep one project in this task's working directory.` : "No project.godot was created for this game task.");
+		projectRoot = roots[0];
+		state = { ...state, projectPath: projectRoot };
+		persist();
 	}
 
 	async function runPlanner(ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
@@ -130,9 +162,10 @@ export default function godotPat(pi: ExtensionAPI): void {
 	}
 
 	async function runExecutor(ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
-		if (!state || !projectRoot) throw new Error("Select a Godot project first.");
+		if (!state) throw new Error("No active LTGD game task.");
 		const messages: string[] = [];
 		try {
+			await bindProject(ctx.cwd);
 			if (state.phase === "generate") {
 				if (state.plan?.length && state.failureFingerprint && (await inspectProject(projectRoot)).fingerprint === state.failureFingerprint) {
 					throw new Error("The project has not changed since the last failed Executor check. Stop instead of repeating it.");
@@ -166,12 +199,11 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.on("input", (event) => {
 		if (event.source === "extension" || !event.text.trim()) return;
-		latestUserRequest = event.text.trim();
 		inputRevision++;
 	});
 
 	pi.on("agent_before_settle", async (event, ctx) => {
-		if (event.outcome !== "completed" || !state?.projectPath || !["generate", "review", "plan"].includes(state.phase)) return;
+		if (event.outcome !== "completed" || !state || !["generate", "review", "plan"].includes(state.phase)) return;
 		const report = await runExecutor(ctx, ctx.signal);
 		const continueGeneration = state?.phase === "generate";
 		return {
@@ -181,8 +213,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_call", (event) => {
-		if (!state?.projectPath) return;
-		if (inputRevision > selectedInputRevision && event.toolName === "godot_set_project") return;
+		if (!state) return;
 		if (inputRevision > selectedInputRevision && (state.phase === "done" || state.phase === "stopped")) return;
 		if (state.phase === "review") {
 			return { block: true, terminate: true, reason: "The Executor owns requirement review. Wait for its result." };
@@ -195,65 +226,42 @@ export default function godotPat(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("before_agent_start", (event) => {
-		if (event.prompt.trim() && (!state?.projectPath || state.phase === "done" || state.phase === "stopped")) latestUserRequest = event.prompt.trim();
-		if (!state?.projectPath || state.phase === "done" || state.phase === "stopped") {
-			return { systemPrompt: event.systemPrompt + "\n\nIf the user requests Godot game development with LTGD, call godot_set_project to activate the workflow. For other tasks, leave LTGD tools unused." };
+	pi.on("before_agent_start", (event, ctx) => {
+		if (!state && event.prompt.trim()) {
+			state = newTask(event.prompt.trim());
+			selectedInputRevision = inputRevision;
+			persist();
 		}
-		return { systemPrompt: event.systemPrompt + `\n\nWhen working on the selected LTGD Godot game, follow this workflow; for unrelated requests, use Pi normally:
-- You are the Generator. Keep Pi's current directory. The selected project is ${state.projectPath}.
+		if (!state || state.phase === "done" || state.phase === "stopped") return;
+		return { systemPrompt: event.systemPrompt + `\n\nYou are the Generator for the active LTGD game task:
+- Work in the output directory requested by the user; otherwise create game/ under ${ctx.cwd}. Create project.godot there. The Executor locates that project automatically when this turn ends.
 - Build the game from the user's original task immediately. Do not write an upfront plan, break the task into a long checklist, request a Planner, or create optional objectives. Make only the local implementation decisions needed to code.
 - Implement the complete requested player flow in one focused pass. Read files and run Godot during development only to resolve a concrete implementation blocker. Do not start repeated screenshot, self-test, refactor, visual polish, or minor-issue cycles.
 - A flaw you noticed yourself is not a new work item. Fix it now only if it prevents an explicit original requirement or the main player flow from working; otherwise stop and let the Executor review the project.
 - After the requested implementation is present, STOP using tools and end this Generator turn. The Executor automatically performs Godot import, boot, and independent requirement review. Do not call a verification or finish tool, and do not claim the whole task is done before the Executor reports.
 - If the Executor returns a confirmed failure and a Planner handoff, implement only those repair subtasks, then end the turn again. Do not expand the plan into optional improvements.
-- Use godot_inspect_project and godot_inspect_scene for concise context. Keep all project files inside the selected directory. Do not modify shared assets/ or Godot_Engine/.` };
+- Use godot_inspect_project and godot_inspect_scene for concise context after the project exists. Keep all project files inside the requested directory. Do not modify shared assets/ or Godot_Engine/.` };
 	});
 
 	pi.on("context_with_system", (event) => {
 		const active = state;
-		if (!active?.projectPath || active.phase === "done" || active.phase === "stopped") return;
+		if (!active || active.phase === "done" || active.phase === "stopped") return;
 		let updated = false;
 		return { messages: event.messages.map((message) => {
 			if (updated || message.role !== "system") return message;
 			updated = true;
-			const current = `Use this state only for the selected Godot game; ignore it for unrelated user requests.\nPhase: ${active.phase}. Project: ${active.projectPath}. Goal: ${active.goal.slice(0, 1000)}.\n${nextInstruction(active)}`;
+			const current = `Phase: ${active.phase}. Project: ${active.projectPath ?? "discover after generation"}. Goal: ${active.goal.slice(0, 1000)}.\n${nextInstruction(active)}`;
 			return { ...message, sections: { ...message.sections, "ltgd-current-state": `<ltgd-current-state>\n${current}\n</ltgd-current-state>` } };
 		}) };
 	});
 
 	pi.registerTool({
-		name: "godot_set_project", label: "Select Godot project",
-		description: "Activate a Godot game task and select its output directory. Omit project to use game/ under Pi's current directory. The original user request and task files are reviewed as a whole; do not decompose requirements here. Set new_task only after a new user request to start another game.",
-		parameters: Type.Object({
-			project: Type.Optional(Type.String({ description: "User-specified project or output directory; relative paths start from Pi's current directory" })),
-			new_task: Type.Optional(Type.Boolean({ description: "Start a new Godot game task even if another project is active" })),
-		}),
-		executionMode: "sequential",
-		async execute(_id, params, _signal, _update, ctx) {
-			if (state?.projectPath) {
-				if (!params.new_task && state.phase === "generate" && !state.lastVerification) {
-					return { content: [{ type: "text", text: `Godot project already selected: ${state.projectPath}. Continue the original game request.` }], details: { project: state.projectPath } };
-				}
-				if (!params.new_task) throw new Error("Use new_task after a new user request to start another Godot game task.");
-				if (inputRevision <= selectedInputRevision) throw new Error("A new user request is required before starting another Godot game task.");
-			}
-			const selected = path.resolve(ctx.cwd, params.project?.trim() || "game");
-			await fs.mkdir(selected, { recursive: true });
-			projectRoot = selected;
-			state = { ...newTask(latestUserRequest || "Godot game development task"), projectPath: selected };
-			selectedInputRevision = inputRevision;
-			persist();
-			return { content: [{ type: "text", text: `Selected Godot project: ${selected}. Build the original user request there, then end this Generator turn for automatic Executor checks.` }], details: { project: selected } };
-		},
-	});
-
-	pi.registerTool({
 		name: "godot_inspect_project", label: "Inspect Godot project",
-		description: "Return a compact index of the selected Godot project and its main scene.",
+		description: "Return a compact index of the generated Godot project and its main scene.",
 		parameters: Type.Object({}),
-		async execute() {
-			if (!(await hasProjectFile(projectRoot))) return { content: [{ type: "text", text: `No project.godot in ${projectRoot || "a selected directory"}. Call godot_set_project first, then create the project there.` }], details: {} };
+		async execute(_id, _params, _signal, _update, ctx) {
+			try { await bindProject(ctx.cwd); }
+			catch (error) { return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], details: {} }; }
 			const index = await inspectProject(projectRoot);
 			return { content: [{ type: "text", text: JSON.stringify({ mainScene: index.mainScene, scenes: index.scenes.slice(0, 80), scripts: index.scripts.slice(0, 80), totalFiles: index.resources }) }], details: {} };
 		},
@@ -263,8 +271,8 @@ export default function godotPat(pi: ExtensionAPI): void {
 		name: "godot_inspect_scene", label: "Inspect Godot scene",
 		description: "Summarize scene nodes, script references, and signal connections without layout noise.",
 		parameters: Type.Object({ scene: Type.String({ description: "Project-relative .tscn path or res:// path" }) }),
-		async execute(_id, params) {
-			if (!projectRoot) throw new Error("Select a project with godot_set_project first.");
+		async execute(_id, params, _signal, _update, ctx) {
+			await bindProject(ctx.cwd);
 			const scene = await inspectScene(projectRoot, params.scene);
 			return { content: [{ type: "text", text: JSON.stringify(scene) }], details: {} };
 		},
@@ -272,7 +280,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.registerCommand("godot-status", {
 		description: "Show the Godot-PaT task phase and latest verification",
-		handler: async (_args, ctx) => ctx.ui.notify(state ? `${state.phase}; project ${projectRoot || "not selected"}.\n${state.lastVerification ? compact(state.lastVerification) : "No verification yet."}` : "No active task.", "info"),
+		handler: async (_args, ctx) => ctx.ui.notify(state ? `${state.phase}; project ${projectRoot || "awaiting Generator output"}.\n${state.lastVerification ? compact(state.lastVerification) : "No verification yet."}` : "No active task.", "info"),
 	});
 
 }
