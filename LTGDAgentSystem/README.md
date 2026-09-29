@@ -19,8 +19,8 @@ Godot 验证结果只保存在 Pi 会话任务状态中，不生成 `runs/` 报�
 Linux 任务说明中的 `/workspace/tools/screenshot.sh` 不在这个工作区。需要查看游戏画面时，可在仓库根目录运行：
 
 ```powershell
-.\LTGDAgentSystem\tools\screenshot.ps1 -Project .\game -Out .\frame.png -Frames 30
-.\LTGDAgentSystem\tools\screenshot.ps1 -Project .\game -Out .\battle.png -Frames 120 -Scenario battle
+.\LTGDAgentSystem\tools\screenshot.ps1 -Out .\frame.png -Frames 30
+.\LTGDAgentSystem\tools\screenshot.ps1 -Out .\battle.png -Frames 120 -Scenario battle
 ```
 
-可用 `-Scene 'res://scenes/Battle.tscn'` 指定启动场景，或用 `-GameArgs @('--difficulty', 'hard')` 向游戏传递其他参数。助手参考 Linux 版流程：通过 Windows 图形驱动和 OpenGL3 启动 Godot，在 1280×720 窗口中运行 `screenshot.gd`，等待指定帧数后读取 viewport 并保存 PNG。不能使用 `--headless`，因为它没有可截图的 viewport 纹理。参数经 `--` 传给脚本，游戏也可从 `OS.get_cmdline_user_args()` 读取 `--scenario`；游戏须自行实现对应的状态跳转。截图先写入临时目录，成功后复制到 `-Out`。
+助手默认使用当前目录中的 Godot 工程；若当前目录不是工程，则使用其下的 `game/`。用户把游戏生成到其他目录时，可先进入该目录，或传 `-Project` 指定。可用 `-Scene 'res://scenes/Battle.tscn'` 指定启动场景，或用 `-GameArgs @('--difficulty', 'hard')` 向游戏传递其他参数。助手参考 Linux 版流程：通过 Windows 图形驱动和 OpenGL3 启动 Godot，在 1280×720 窗口中运行 `screenshot.gd`，等待指定帧数后读取 viewport 并保存 PNG。不能使用 `--headless`，因为它没有可截图的 viewport 纹理。参数经 `--` 传给脚本，游戏也可从 `OS.get_cmdline_user_args()` 读取 `--scenario`；游戏须自行实现对应的状态跳转。截图先写入临时目录，成功后复制到 `-Out`。

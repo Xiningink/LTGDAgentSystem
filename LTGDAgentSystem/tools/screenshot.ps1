@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$Project,
+    [string]$Project,
     [Parameter(Mandatory = $true)][string]$Out,
     [ValidateRange(1, 100000)][int]$Frames = 30,
     [string]$Scene,
@@ -11,6 +11,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+if (-not $Project) {
+    if (Test-Path -LiteralPath '.\project.godot' -PathType Leaf) { $Project = '.' }
+    elseif (Test-Path -LiteralPath '.\game\project.godot' -PathType Leaf) { $Project = '.\game' }
+    else { throw 'No Godot project in the current directory or game/. Use -Project for another directory.' }
+}
 $projectPath = (Resolve-Path -LiteralPath $Project).Path
 if (-not (Test-Path -LiteralPath (Join-Path $projectPath 'project.godot') -PathType Leaf)) {
     throw "No project.godot found in: $projectPath"
@@ -21,7 +26,7 @@ if (-not $Godot) {
     $Godot = Join-Path $workspaceRoot 'Godot_Engine\Godot_v4.6.2-stable_win64_console.exe'
 }
 $godotPath = (Resolve-Path -LiteralPath $Godot).Path
-$outputPath = [System.IO.Path]::GetFullPath($Out)
+$outputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Out)
 $outputDirectory = [System.IO.Path]::GetDirectoryName($outputPath)
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 
