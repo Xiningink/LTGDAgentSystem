@@ -1,8 +1,6 @@
 # Horror Signal Lost
 
-Build a **Horror Signal Lost** game in Godot 4 in the current Pi working
-directory, unless the user explicitly specifies a project or delivery path.
-In that case, build directly at the requested path.
+Build a **Horror Signal Lost** game in Godot 4 at `.\output\game`.
 This is not a prototype. It is a **complete, shippable micro-game** that could
 sit on an itch.io page or Steam as a polished vertical slice.
 
@@ -54,29 +52,51 @@ Copy what you need into your project's `assets/` folder.
 ## Project layout
 
 The LTGD launcher keeps Pi's current working directory. Call
-`godot_set_project` before editing: pass the user's explicit project or delivery
-directory when given, or omit the path to create `game/` under Pi's current
-directory. Put all Godot project files there. Relative project paths start from
-Pi's current directory. From the repository root, the Godot console is at
+`godot_set_project` with `project: "output/game"` before editing, and put all
+Godot project files there. Relative project paths start from Pi's current
+directory. From the repository root, the Godot console is at
 `Godot_Engine/Godot_v4.6.2-stable_win64_console.exe`.
 
 ```
-game/    (default project directory; an explicit path takes precedence)
+.\output\game
   project.godot
   Main.tscn
   scripts/  scenes/  assets/
 ```
 
-From the repository root, set `$projectDir` to the actual game project directory
-and confirm that it launches cleanly. Use the user's specified path when given:
+From the repository root, confirm that the specified game project launches cleanly:
 
 ```powershell
-$projectDir = Join-Path (Get-Location).Path "game"  # use the explicit project path when given
+$projectDir = Join-Path (Get-Location).Path "output\game"
 & .\Godot_Engine\Godot_v4.6.2-stable_win64_console.exe --headless --path $projectDir --quit-after 5
 ```
 
 Use the Godot 4 command-line documentation for engine flags.
 
-The Linux screenshot helper is not available in this Windows workflow. Inspect visuals in the Godot editor during manual playtesting.
+## Visual check
+
+A Windows screenshot helper is available at
+`LTGDAgentSystem/tools/screenshot.ps1`. Use it to actually inspect the title
+screen, radio station, and late-game or result
+screens. Run it from the game project directory, then use Pi's `read` tool on
+each saved PNG. A headless launch does not show what these screens look like.
+
+From the repository root:
+
+```powershell
+Push-Location .\output\game
+try {
+    & ..\..\LTGDAgentSystem\tools\screenshot.ps1 -Out ..\title.png -Frames 60
+    & ..\..\LTGDAgentSystem\tools\screenshot.ps1 -Out ..\signal_scan.png -Frames 120 -Scenario signal_scan
+} finally {
+    Pop-Location
+}
+```
+
+Use Pi's `read` tool on `output/title.png` and `output/signal_scan.png`. For
+`-Scenario signal_scan`, the game must read `--scenario signal_scan` from
+`OS.get_cmdline_user_args()` and enter that state. Use another scenario ID when
+checking a different state. The helper reads the project from the current
+directory, so no `-Project` argument is needed here.
 
 Do not create demo input traces or replay scripts unless the user asks.
