@@ -21,28 +21,8 @@ async function hasProjectFile(root: string): Promise<boolean> {
 	}
 }
 
-async function findProjectRoots(cwd: string, goal: string): Promise<string[]> {
-	const roots = new Set<string>();
-	const mentionedRoots = new Set<string>();
-	const skip = new Set([".git", ".godot", ".pi", ".pi-godot", "node_modules", "assets", "Godot_Engine", "tasks", "reports", "PiAgent"]);
-	async function visit(directory: string): Promise<void> {
-		let entries;
-		try { entries = await fs.readdir(directory, { withFileTypes: true }); }
-		catch { return; }
-		for (const entry of entries) {
-			if (entry.isSymbolicLink()) continue;
-			if (entry.isFile() && entry.name === "project.godot") roots.add(directory);
-			else if (entry.isDirectory() && !skip.has(entry.name)) await visit(path.join(directory, entry.name));
-		}
-	}
-	await visit(cwd);
-	const mentionedPaths = [...goal.matchAll(/["'“]([^"'”]*[\\/][^"'”]*)["'”]|((?:[A-Za-z]:[\\/]|\.{1,2}[\\/])[^\s"'“”]+)/g)]
-		.map((match) => match[1] ?? match[2]);
-	for (const candidate of mentionedPaths) {
-		const directory = path.resolve(cwd, candidate.replace(/[，。,:;）)\]]+$/u, ""));
-		if (!/\.(?:md|txt|toml)$/i.test(directory) && await hasProjectFile(directory)) mentionedRoots.add(directory);
-	}
-	return mentionedRoots.size ? [...mentionedRoots] : [...roots];
+function handoffPath(text: string): string | undefined {
+	return [...text.matchAll(/<ltgd-project-path>([^\r\n<>]+)<\/ltgd-project-path>/g)].at(-1)?.[1].trim();
 }
 
 function compact(result: Verification): string {
@@ -54,7 +34,7 @@ function compact(result: Verification): string {
 }
 
 function nextInstruction(state: TaskState): string {
-	if (state.phase === "generate") return state.plan?.length ? generatorHandoff(state) : "Implement the original game request directly. When the first complete implementation is in the project, end this Generator turn so the Executor can check it. Do not start a self-review or polish cycle.";
+	if (state.phase === "generate") return `${state.plan?.length ? generatorHandoff(state) : "Implement the original game request directly. When the first complete implementation is in the project, end this Generator turn so the Executor can check it. Do not start a self-review or polish cycle."} End your final reply with <ltgd-project-path>the actual Godot project directory</ltgd-project-path>.`;
 	if (state.phase === "review") return "The Executor is independently reviewing the original requirements. Wait for its result.";
 	if (state.phase === "done") return "Give the user a concise final report with the verification and requirement review evidence.";
 	if (state.phase === "stopped") return `Stop automatic retries and report the blocker: ${state.stopReason ?? "Executor could not proceed"}.`;
@@ -95,12 +75,17 @@ export default function godotPat(pi: ExtensionAPI): void {
 			}
 		}
 	}
-	async function bindProject(cwd: string): Promise<void> {
+	async function bindProject(cwd: string, declaredPath?: string): Promise<void> {
 		if (!state) throw new Error("No active LTGD game task.");
-		if (await hasProjectFile(projectRoot)) return;
-		const roots = await findProjectRoots(cwd, state.goal);
-		if (roots.length !== 1) throw new Error(roots.length ? `Found multiple Godot projects: ${roots.join("; ")}. Keep one project in this task's working directory.` : "No project.godot was created for this game task.");
-		projectRoot = roots[0];
+		if (!declaredPath && !projectRoot) throw new Error("Generator did not provide a <ltgd-project-path> directory handoff.");
+		const root = path.resolve(cwd, declaredPath ?? projectRoot);
+		for (const shared of ["assets", "Godot_Engine"]) {
+			const protectedRoot = path.join(workspace, shared);
+			if (root === protectedRoot || root.startsWith(protectedRoot + path.sep)) throw new Error(`Godot project cannot be under shared ${shared}/: ${root}`);
+		}
+		if (!(await hasProjectFile(root))) throw new Error(`No project.godot at Generator handoff path: ${root}`);
+		if (projectRoot === root && state.projectPath === root) return;
+		projectRoot = root;
 		state = { ...state, projectPath: projectRoot };
 		persist();
 	}
@@ -161,11 +146,11 @@ export default function godotPat(pi: ExtensionAPI): void {
 		throw new Error("Executor did not produce a valid requirement review.");
 	}
 
-	async function runExecutor(ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
+	async function runExecutor(ctx: ExtensionContext, signal?: AbortSignal, declaredPath?: string): Promise<string> {
 		if (!state) throw new Error("No active LTGD game task.");
 		const messages: string[] = [];
 		try {
-			await bindProject(ctx.cwd);
+			await bindProject(ctx.cwd, declaredPath);
 			if (state.phase === "generate") {
 				if (state.plan?.length && state.failureFingerprint && (await inspectProject(projectRoot)).fingerprint === state.failureFingerprint) {
 					throw new Error("The project has not changed since the last failed Executor check. Stop instead of repeating it.");
@@ -204,7 +189,9 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.on("agent_before_settle", async (event, ctx) => {
 		if (event.outcome !== "completed" || !state || !["generate", "review", "plan"].includes(state.phase)) return;
-		const report = await runExecutor(ctx, ctx.signal);
+		const finalAssistant = [...(event.context?.contextMessages ?? [])].reverse().find((message) => message.role === "assistant");
+		const finalText = finalAssistant?.role === "assistant" ? finalAssistant.content.filter((part) => part.type === "text").map((part) => part.text).join("\n") : "";
+		const report = await runExecutor(ctx, ctx.signal, handoffPath(finalText));
 		const continueGeneration = state?.phase === "generate";
 		return {
 			entries: [...event.entries, { type: "custom_message" as const, customType: "ltgd-executor", content: report, display: true }],
@@ -234,13 +221,13 @@ export default function godotPat(pi: ExtensionAPI): void {
 		}
 		if (!state || state.phase === "done" || state.phase === "stopped") return;
 		return { systemPrompt: event.systemPrompt + `\n\nYou are the Generator for the active LTGD game task:
-- Work in the output directory requested by the user; otherwise create game/ under ${ctx.cwd}. Create project.godot there. The Executor locates that project automatically when this turn ends.
+- Work in the output directory requested by the user; otherwise create game/ under ${ctx.cwd}. Create project.godot there.
 - Build the game from the user's original task immediately. Do not write an upfront plan, break the task into a long checklist, request a Planner, or create optional objectives. Make only the local implementation decisions needed to code.
 - Implement the complete requested player flow in one focused pass. Read files and run Godot during development only to resolve a concrete implementation blocker. Do not start repeated screenshot, self-test, refactor, visual polish, or minor-issue cycles.
 - A flaw you noticed yourself is not a new work item. Fix it now only if it prevents an explicit original requirement or the main player flow from working; otherwise stop and let the Executor review the project.
-- After the requested implementation is present, STOP using tools and end this Generator turn. The Executor automatically performs Godot import, boot, and independent requirement review. Do not call a verification or finish tool, and do not claim the whole task is done before the Executor reports.
+- After the requested implementation is present, STOP using tools and end this Generator turn. As the final line of your reply, write <ltgd-project-path>the actual Godot project directory</ltgd-project-path>, using its real path without quotes or backticks. The Executor uses exactly that directory for Godot import, boot, and independent requirement review. Do not call a verification or finish tool, and do not claim the whole task is done before the Executor reports.
 - If the Executor returns a confirmed failure and a Planner handoff, implement only those repair subtasks, then end the turn again. Do not expand the plan into optional improvements.
-- Use godot_inspect_project and godot_inspect_scene for concise context after the project exists. Keep all project files inside the requested directory. Do not modify shared assets/ or Godot_Engine/.` };
+- After the first handoff, godot_inspect_project and godot_inspect_scene can provide concise context for the bound project. Keep all project files inside the requested directory. Do not modify shared assets/ or Godot_Engine/.` };
 	});
 
 	pi.on("context_with_system", (event) => {
@@ -250,7 +237,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 		return { messages: event.messages.map((message) => {
 			if (updated || message.role !== "system") return message;
 			updated = true;
-			const current = `Phase: ${active.phase}. Project: ${active.projectPath ?? "discover after generation"}. Goal: ${active.goal.slice(0, 1000)}.\n${nextInstruction(active)}`;
+			const current = `Phase: ${active.phase}. Project: ${active.projectPath ?? "awaiting Generator path handoff"}. Goal: ${active.goal.slice(0, 1000)}.\n${nextInstruction(active)}`;
 			return { ...message, sections: { ...message.sections, "ltgd-current-state": `<ltgd-current-state>\n${current}\n</ltgd-current-state>` } };
 		}) };
 	});
@@ -272,7 +259,8 @@ export default function godotPat(pi: ExtensionAPI): void {
 		description: "Summarize scene nodes, script references, and signal connections without layout noise.",
 		parameters: Type.Object({ scene: Type.String({ description: "Project-relative .tscn path or res:// path" }) }),
 		async execute(_id, params, _signal, _update, ctx) {
-			await bindProject(ctx.cwd);
+			try { await bindProject(ctx.cwd); }
+			catch (error) { return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], details: {} }; }
 			const scene = await inspectScene(projectRoot, params.scene);
 			return { content: [{ type: "text", text: JSON.stringify(scene) }], details: {} };
 		},

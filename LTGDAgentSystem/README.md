@@ -5,12 +5,12 @@
 系统分为三个角色：
 
 - **Generator** 是 Pi 原生编码 Agent。它直接实现原始需求，不在失败前输出正式计划或细分工单。首版实现写入工程后结束本轮；修复轮只实现 Planner 返回的子任务，然后再次结束本轮。开发时可以针对具体阻碍运行和查看游戏，但不做开放式自检、截图迭代或可选 polish。
-- **Executor** 在 Pi 的 `agent_before_settle` 边界自动接管，无需 Generator 记住调用验证工具。它定位唯一的 `project.godot`，再运行 Godot 结构检查、导入和无头启动。通过后，用独立、短上下文的模型请求审查原始用户需求、实际输出路径、任务文件和当前工程内容。审查只返回 `implemented` 或 `missing`；明确要求缺失或预期玩家流程无法工作才算失败。仅凭主观 polish 建议不得开启修复。运行和需求审查都通过时记为 `done`。
+- **Executor** 在 Pi 的 `agent_before_settle` 边界自动接管，无需 Generator 记住调用验证工具。它读取 Generator 结束本轮时交接的实际工程目录，确认该目录有 `project.godot`，再运行 Godot 结构检查、导入和无头启动。通过后，用独立、短上下文的模型请求审查原始用户需求、实际输出路径、任务文件和当前工程内容。审查只返回 `implemented` 或 `missing`；明确要求缺失或预期玩家流程无法工作才算失败。仅凭主观 polish 建议不得开启修复。运行和需求审查都通过时记为 `done`。
 - **Planner** 仅在 Executor 确认 Godot 失败或原始需求缺失后调用。它接收本次错误或缺项、相关工程证据及原始目标，输出针对该失败的最小结构化修复计划；它不能编辑工程，也不能添加可选目标。无法根据证据修复时，流程停止并说明原因。
 
 流程是 `Generator → Executor（Godot → 需求审查）→ done`；任一检查失败则 `Executor → Planner → Generator → Executor`。Executor 和 Planner 不继承 Generator 的整段对话。项目文件是共享事实来源；修复计划作为简短交接返回 Pi，Generator 的 Pi 会话仍然保留自身历史。自动交接解决了 Generator 结束本轮却忘记验证的问题；它不能强制中断尚未结束的 Generator 轮次，生成阶段的及时收手仍取决于明确提示词。
 
-无需调用项目设置工具。Executor 会在 Pi 当前目录内寻找唯一的 `project.godot`；用户明确写出目录外的输出路径时，也会检查该路径。找不到或找到多个工程时会报告原因，不会猜测。`godot_inspect_project` 和 `godot_inspect_scene` 提供简短项目索引与场景结构。`/godot-status` 可查看阶段和验证结果。完成一个游戏后，可用新的 Pi 会话开始下一个游戏。
+无需调用项目设置工具。Generator 在本轮最后一行用 `<ltgd-project-path>实际工程目录</ltgd-project-path>` 交接路径；Executor 只检查该目录，既不遍历其他工程，也不从用户原话中用正则猜测路径。首次交接后，路径保存在 Pi 会话状态中，修复轮可沿用。缺少交接或该目录没有 `project.godot` 时会报告原因。`godot_inspect_project` 和 `godot_inspect_scene` 在路径绑定后提供简短项目索引与场景结构。`/godot-status` 可查看阶段和验证结果。完成一个游戏后，可用新的 Pi 会话开始下一个游戏。
 
 Godot 验证结果只保存在 Pi 会话任务状态中，不生成 `runs/` 报告。验证指纹以 Godot 导入和运行后的工程文件为准，并排除 `.godot` 等缓存目录。如果 Planner 要求修复后工程文件仍未变化，系统停止重复检查。Godot PASS 仅代表导入与启动通过，需求是否满足由随后独立审查决定。
 
