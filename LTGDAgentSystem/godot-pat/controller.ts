@@ -27,6 +27,7 @@ export interface Subtask {
 export interface TaskState {
 	schemaVersion: 2;
 	goal: string;
+	projectPath?: string;
 	phase: Phase;
 	attempts: number;
 	bestScore: number;
