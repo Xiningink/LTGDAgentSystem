@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export type Phase = "generate" | "plan" | "review" | "done" | "stopped";
 export type VerificationStatus = "pass" | "fail" | "infrastructure";
 
@@ -21,7 +23,6 @@ export interface Subtask {
 	id: string;
 	problem: string;
 	goal: string;
-	parentWorkItemId?: string;
 	suggested_files?: string[];
 }
 
@@ -45,40 +46,15 @@ export interface RequirementCheck {
 	observed?: string;
 }
 
-export interface WorkItem {
-	id: string;
-	goal: string;
-	source: "user_requirement" | "godot_failure" | "requirement_gap";
-	sourceId: string;
-	parentWorkItemId?: string;
-	doneWhen: string;
-	status: "active" | "reported_complete" | "closed" | "blocked";
-	originEvidence: string;
-	completionEvidence?: string;
-}
-
-export interface WorkProposal {
-	basis: "user_requirement" | "godot_failure";
-	sourceId: string;
-	expected: string;
-	observed: string;
-	evidence: string;
-	proposedGoal: string;
-}
-
-export type ScopeDecision = "required" | "optional" | "uncertain";
-
-export type WorksetSource = "user" | "planner" | "review";
-
-export interface ActiveWorkset {
-	source: WorksetSource;
-	items: { id: string; goal: string }[];
-}
-
 export interface WorksetCheck {
 	id: string;
 	status: "completed" | "unresolved";
 	evidence: string;
+}
+
+export interface ActiveWorkset {
+	source: "user" | "planner" | "review";
+	items: { id: string; goal: string }[];
 }
 
 export interface DecompositionPlan {
@@ -90,43 +66,39 @@ export interface DecompositionPlan {
 }
 
 export interface TaskState {
-	schemaVersion: 6;
+	schemaVersion: 7;
 	goal: string;
 	requirements: Requirement[];
-	requirementSources?: RequirementSource[];
-	requirementContractHash: string;
-	workItems: WorkItem[];
-	extraWorkIds?: string[];
-	lastFailureWorkIds?: string[];
-	suggestions?: { proposal: WorkProposal; decision: Exclude<ScopeDecision, "required">; reason: string }[];
-	pendingRequirements?: string[];
 	projectPath?: string;
 	phase: Phase;
-	attempts: number;
-	lastFailure?: string;
-	unchangedFailureStreak?: number;
-	lastFingerprint?: string;
+	pendingRequirementIds?: string[];
 	lastVerification?: Verification;
+	lastFailureSignature?: string;
+	unchangedFailureStreak?: number;
 	plan: Subtask[];
 	planObjective?: string;
-	/** Retained only when restoring a version 2 session. */
-	integrationChecks?: string[];
-	/** Generator-reported completed work; older records may contain verified subtask evidence. */
-	solved: { id: string; evidence: string; fingerprint: string }[];
 	completionEvidence?: RequirementCheck[] | string[];
 	plannerError?: string;
+	attempts: number;
+}
+
+function nonempty(text: unknown, label: string): asserts text is string {
+	if (typeof text !== "string" || !text.trim()) throw new Error(`${label} must be a nonempty string.`);
 }
 
 export function newTask(goal: string, requirements?: Requirement[], sources?: RequirementSource[]): TaskState {
-	const selected = (requirements?.length ? requirements : [{ id: "R1", text: goal }]).map((item) => item.sourceEvidence
-		? { ...item, sourceEvidence: item.sourceEvidence.map((evidence) => ({ ...evidence })) } : { ...item });
-	const seen = new Set<string>();
+	nonempty(goal, "Task goal");
+	const selected = (requirements?.length ? requirements : [{ id: "R1", text: goal }]).map((item) => ({ ...item,
+		...(item.sourceEvidence ? { sourceEvidence: item.sourceEvidence.map((evidence) => ({ ...evidence })) } : {}) }));
 	const sourceById = new Map(sources?.map((source) => [source.id, source.text]));
+	const seen = new Set<string>();
 	for (const item of selected) {
 		if (!item || typeof item !== "object") throw new Error("Each requirement must be an object.");
 		nonempty(item.id, "Requirement ID");
 		nonempty(item.text, `Requirement ${item.id}`);
 		if (item.doneWhen !== undefined) nonempty(item.doneWhen, `Completion condition for ${item.id}`);
+		if (seen.has(item.id)) throw new Error("Requirement IDs must be unique.");
+		seen.add(item.id);
 		if (sources) {
 			nonempty(item.doneWhen, `Completion condition for ${item.id}`);
 			if (!item.sourceEvidence?.length) throw new Error(`Requirement ${item.id} needs source evidence.`);
@@ -134,131 +106,61 @@ export function newTask(goal: string, requirements?: Requirement[], sources?: Re
 				if (!sourceById.get(evidence.sourceId)?.includes(evidence.quote)) throw new Error(`Requirement ${item.id} has invalid source evidence.`);
 			}
 		}
-		if (seen.has(item.id)) throw new Error("Requirement IDs must be unique.");
-		seen.add(item.id);
 	}
-	const requirementSources = sources?.map((source) => ({ ...source }));
-	const requirementContractHash = contractHash(goal, selected, requirementSources);
-	return {
-		schemaVersion: 6, goal, requirements: selected, requirementSources, requirementContractHash,
-		phase: "generate", attempts: 0, plan: [], solved: [],
-		workItems: selected.map((item) => ({ id: item.id, goal: item.text, source: "user_requirement", sourceId: item.id,
-			doneWhen: item.doneWhen ?? item.text, status: "active", originEvidence: item.sourceEvidence?.map((evidence) => `${evidence.sourceId}: ${evidence.quote}`).join("; ") ?? goal })),
-	};
+	return { schemaVersion: 7, goal, requirements: selected, phase: "generate", plan: [], attempts: 0 };
 }
 
-function contractHash(goal: string, requirements: Requirement[], sources?: RequirementSource[]): string {
-	return createHash("sha256").update(JSON.stringify({ goal, requirements, sources: sources ?? [] })).digest("hex");
-}
-
-export function migrateTaskState(loaded: Omit<Partial<TaskState>, "schemaVersion" | "phase"> & { goal: string; phase?: string; schemaVersion?: number }): TaskState {
-	const requirements = loaded.requirements?.length ? loaded.requirements : [{ id: "R1", text: loaded.goal }];
+export function migrateTaskState(loaded: Omit<Partial<TaskState>, "schemaVersion" | "phase"> & {
+	goal: string; phase?: string; schemaVersion?: number; pendingRequirements?: string[]; lastFailure?: string;
+}): TaskState {
 	let base: TaskState;
-	try { base = newTask(loaded.goal, requirements, loaded.requirementSources); }
+	try { base = newTask(loaded.goal, loaded.requirements); }
 	catch (error) {
 		const fallback = newTask(loaded.goal);
-		return { ...fallback, projectPath: loaded.projectPath, lastVerification: loaded.lastVerification, phase: "stopped",
-			plannerError: `The saved requirement contract is invalid and needs manual review: ${error instanceof Error ? error.message : String(error)}` };
+		return { ...fallback, projectPath: loaded.projectPath, phase: "stopped",
+			plannerError: `Saved requirements are invalid: ${error instanceof Error ? error.message : String(error)}` };
 	}
-	const contractError = loaded.schemaVersion && loaded.schemaVersion >= 6 && loaded.requirementContractHash !== base.requirementContractHash
-		? "The locked requirement contract changed or lost its integrity hash; manual review is required." : undefined;
 	const legacyDone = loaded.phase === "done" && (!Array.isArray(loaded.completionEvidence) || !loaded.completionEvidence.length);
-	const phase = legacyDone ? "review" : ["direct", "repair", "execute_plan"].includes(loaded.phase ?? "") ? "generate" : loaded.phase ?? "generate";
-	const plan = (loaded.plan ?? []).map((task) => ({ ...task, problem: task.problem ?? "Continue the previously planned subtask.",
-		suggested_files: task.suggested_files ?? (task as Subtask & { targets?: string[] }).targets }));
-	let workItems = loaded.workItems?.length ? loaded.workItems : base.workItems;
-	let lastFailureWorkIds = loaded.lastFailureWorkIds;
-	if (!loaded.workItems?.length && loaded.lastVerification?.status === "fail") {
-		const failures: WorkItem[] = loaded.lastVerification.errors.map((error, index) => ({
-			id: `E${loaded.attempts ?? 1}-${index + 1}`, goal: error.message, source: "godot_failure",
-			sourceId: `E${loaded.attempts ?? 1}-${index + 1}`, doneWhen: `The observed ${error.stage} error no longer occurs.`,
-			status: "active", originEvidence: error.message,
-		}));
-		workItems = [...workItems, ...failures];
-		lastFailureWorkIds = failures.map((item) => item.id);
-	}
-	if (!loaded.workItems?.length && plan.length) {
-		const parent = workItems.find((item) => item.id === lastFailureWorkIds?.[0])
-			?? workItems.find((item) => item.id === loaded.pendingRequirements?.[0]);
-		if (parent) workItems = [...workItems, ...plan.map((task) => ({ id: task.id, goal: task.goal,
-			source: parent.source, sourceId: parent.sourceId, parentWorkItemId: parent.id, doneWhen: task.goal,
-			status: "active" as const, originEvidence: parent.originEvidence }))];
-		else return { ...base, ...loaded, schemaVersion: 6, requirementContractHash: base.requirementContractHash,
-			phase: "stopped", requirements, plan, workItems,
-			plannerError: "An older plan has no traceable work source and needs review before continuing.", solved: loaded.solved ?? [] };
-	}
-	return { ...base, ...loaded, schemaVersion: 6, requirementContractHash: base.requirementContractHash,
-		requirements, phase: contractError ? "stopped" : phase as Phase, plan, workItems,
-		lastFailureWorkIds, solved: loaded.solved ?? [], plannerError: contractError ?? loaded.plannerError };
+	const phase: Phase = legacyDone ? "review" : ["generate", "plan", "review", "done", "stopped"].includes(loaded.phase ?? "")
+		? loaded.phase as Phase : "generate";
+	return { ...base, projectPath: loaded.projectPath, phase, attempts: loaded.attempts ?? 0,
+		pendingRequirementIds: loaded.pendingRequirementIds ?? loaded.pendingRequirements,
+		lastVerification: loaded.lastVerification, lastFailureSignature: loaded.lastFailureSignature ?? loaded.lastFailure,
+		unchangedFailureStreak: loaded.unchangedFailureStreak, plan: (loaded.plan ?? []).map((task) => ({
+			id: task.id, problem: task.problem ?? "Repair the current Godot failure.", goal: task.goal,
+			suggested_files: task.suggested_files ?? (task as Subtask & { targets?: string[] }).targets,
+		})), planObjective: loaded.planObjective, completionEvidence: loaded.completionEvidence,
+		plannerError: loaded.plannerError };
 }
 
 export function recordVerification(state: TaskState, result: Verification): TaskState {
 	if (result.status === "infrastructure") return { ...state, lastVerification: result };
 	const attempts = state.attempts + 1;
-	if (result.status === "pass") {
-		return { ...state, phase: "review", attempts, lastVerification: result, lastFingerprint: result.fingerprint, lastFailure: undefined, unchangedFailureStreak: 0,
-			workItems: state.workItems.map((item) => item.source === "godot_failure" && item.status === "reported_complete" ? { ...item, status: "closed" } : item) };
-	}
-	const signature = createHash("sha256").update(JSON.stringify(result.errors.map((error) => [error.stage, error.file, error.line, error.message]))).digest("hex");
-	const sameFailure = state.lastFailure === signature;
+	if (result.status === "pass") return { ...state, phase: "review", attempts, lastVerification: result,
+		lastFailureSignature: undefined, unchangedFailureStreak: 0 };
+	const signature = createHash("sha256").update(JSON.stringify(result.errors.map((error) =>
+		[error.stage, error.file, error.line, error.message]))).digest("hex");
+	const sameFailure = state.lastFailureSignature === signature;
 	const unchangedFailureStreak = sameFailure ? (state.unchangedFailureStreak ?? 0) + 1 : 0;
-	const phase: Phase = sameFailure && (state.lastFingerprint === result.fingerprint || unchangedFailureStreak >= 2) ? "stopped" : "plan";
-	const failureItems: WorkItem[] = result.errors.map((error, index) => ({
-		id: `E${attempts}-${index + 1}`, goal: error.message, source: "godot_failure", sourceId: `E${attempts}-${index + 1}`,
-		doneWhen: `The observed ${error.stage} error no longer occurs.`, status: "active", originEvidence: error.message,
-	}));
-	return {
-		...state,
-		phase,
-		attempts,
-		lastFailure: signature,
-		unchangedFailureStreak,
-		lastFingerprint: result.fingerprint,
-		lastVerification: result,
-		lastFailureWorkIds: failureItems.map((item) => item.id),
-		workItems: [...state.workItems, ...failureItems],
-		plannerError: phase === "stopped" ? "The same Godot errors persisted after repeated revisions." : undefined,
-	};
-}
-
-function nonempty(text: unknown, label: string): asserts text is string {
-	if (typeof text !== "string" || !text.trim()) throw new Error(`${label} must be a nonempty string.`);
+	const phase: Phase = sameFailure && (state.lastVerification?.fingerprint === result.fingerprint || unchangedFailureStreak >= 2)
+		? "stopped" : "plan";
+	return { ...state, phase, attempts, lastVerification: result, lastFailureSignature: signature,
+		unchangedFailureStreak, plannerError: phase === "stopped" ? "The same Godot errors persisted after repeated revisions." : undefined };
 }
 
 export function activeWorkset(state: TaskState): ActiveWorkset {
 	if (state.phase !== "generate") throw new Error("An active workset is available only during generation.");
-	const extras = (state.extraWorkIds ?? []).map((id) => {
-		const item = state.workItems.find((candidate) => candidate.id === id);
-		if (!item) throw new Error(`Unknown approved work item: ${id}.`);
-		return { id, goal: item.goal };
-	});
-	if (state.pendingRequirements?.length) {
-		return {
-			source: "review",
-			items: [...state.pendingRequirements.map((id) => {
-				const requirement = state.requirements.find((item) => item.id === id);
-				if (!requirement) throw new Error(`Unknown pending requirement: ${id}.`);
-				return { id, goal: requirement.text };
-			}), ...extras],
-		};
-	}
-	if (state.plan.length) return { source: "planner", items: [...state.plan.map(({ id, goal }) => ({ id, goal })), ...extras] };
-	return { source: "user", items: [
-		...state.requirements.map(({ id, text }) => ({ id, goal: text })),
-		...extras,
-	] };
+	if (state.pendingRequirementIds?.length) return { source: "review", items: state.pendingRequirementIds.map((id) => {
+		const requirement = state.requirements.find((item) => item.id === id);
+		if (!requirement) throw new Error(`Unknown pending requirement: ${id}.`);
+		return { id, goal: requirement.text };
+	}) };
+	if (state.plan.length) return { source: "planner", items: state.plan.map(({ id, goal }) => ({ id, goal })) };
+	return { source: "user", items: state.requirements.map(({ id, text }) => ({ id, goal: text })) };
 }
 
-export function validateWorksetChecks(state: TaskState, checks: WorksetCheck[] | undefined, reopenRequirementId?: string): { workset: ActiveWorkset; unresolved: WorksetCheck[] } {
-	let workset: ActiveWorkset;
-	if (reopenRequirementId !== undefined) {
-		if (state.phase !== "review") throw new Error("Reopen a requirement only after a successful verification.");
-		const requirement = state.requirements.find((item) => item.id === reopenRequirementId);
-		if (!requirement) throw new Error(`Unknown original requirement: ${reopenRequirementId}.`);
-		workset = { source: "review", items: [{ id: requirement.id, goal: requirement.text }] };
-	} else {
-		workset = activeWorkset(state);
-	}
+export function validateWorksetChecks(state: TaskState, checks: WorksetCheck[] | undefined): { workset: ActiveWorkset; unresolved: WorksetCheck[] } {
+	const workset = activeWorkset(state);
 	if (!Array.isArray(checks)) throw new Error(`Report every ${workset.source} workset item in workset_checks before verification.`);
 	const expected = new Set(workset.items.map((item) => item.id));
 	const seen = new Set<string>();
@@ -275,7 +177,7 @@ export function validateWorksetChecks(state: TaskState, checks: WorksetCheck[] |
 }
 
 export function acceptPlan(state: TaskState, plan: DecompositionPlan): TaskState {
-	if (state.phase !== "plan" || state.lastVerification?.status !== "fail" || !state.lastFailureWorkIds?.length) {
+	if (state.phase !== "plan" || state.lastVerification?.status !== "fail") {
 		throw new Error("Planner requires an actual failed Godot verification recorded by the Controller.");
 	}
 	if (!plan || typeof plan !== "object" || Array.isArray(plan)) throw new Error("Supply a structured plan.");
@@ -285,13 +187,13 @@ export function acceptPlan(state: TaskState, plan: DecompositionPlan): TaskState
 		if (plan.subtasks !== undefined && (!Array.isArray(plan.subtasks) || plan.subtasks.length)) throw new Error("A no-change decision cannot contain subtasks.");
 		if (!Array.isArray(plan.evidence) || !plan.evidence.length) throw new Error("A no-change decision requires verification evidence.");
 		plan.evidence.forEach((item, index) => nonempty(item, `Planner evidence[${index}]`));
-		return { ...state, phase: "stopped", plan: [], planObjective: undefined, plannerError: `${plan.reason}${plan.evidence?.length ? ` Evidence: ${plan.evidence.join("; ")}` : ""}` };
+		return { ...state, phase: "stopped", plan: [], planObjective: undefined,
+			plannerError: `${plan.reason} Evidence: ${plan.evidence.join("; ")}` };
 	}
 	nonempty(plan.objective, "Plan objective");
-	const subtasks = plan.subtasks;
-	if (!Array.isArray(subtasks) || !subtasks.length) throw new Error("Plan must contain subtasks.");
+	if (!Array.isArray(plan.subtasks) || !plan.subtasks.length) throw new Error("Plan must contain subtasks.");
 	const seen = new Set<string>();
-	for (const task of subtasks) {
+	for (const task of plan.subtasks) {
 		if (!task || typeof task !== "object" || Array.isArray(task)) throw new Error("Each subtask must be an object.");
 		nonempty(task.id, "Subtask ID");
 		nonempty(task.problem, `Problem for ${task.id}`);
@@ -302,74 +204,17 @@ export function acceptPlan(state: TaskState, plan: DecompositionPlan): TaskState
 		}
 		seen.add(task.id);
 	}
-	const defaultParent = state.lastFailureWorkIds?.[0];
-	const children: WorkItem[] = subtasks.map((task) => {
-		const parent = state.workItems.find((item) => item.id === (task.parentWorkItemId ?? defaultParent));
-		if (!parent) throw new Error(`Planner subtask ${task.id} has no authorized parent work item.`);
-		return { id: task.id, goal: task.goal, source: parent.source, sourceId: parent.sourceId,
-			parentWorkItemId: parent.id, doneWhen: task.goal, status: "active", originEvidence: parent.originEvidence };
-	});
-	return { ...state, phase: "generate", plan: subtasks, planObjective: plan.objective, pendingRequirements: undefined,
-		integrationChecks: undefined, solved: [], completionEvidence: undefined, plannerError: undefined,
-		workItems: [...state.workItems.filter((item) => !children.some((child) => child.id === item.id)), ...children], extraWorkIds: [] };
-}
-
-export function validatePlanScope(state: TaskState, plan: DecompositionPlan): void {
-	if (state.phase !== "plan" || state.lastVerification?.status !== "fail") {
-		throw new Error("Planner scope review requires an actual failed Godot verification.");
-	}
-	if (plan.decision !== "revise") return;
-	const allowed = new Set(state.lastFailureWorkIds ?? []);
-	if (!allowed.size) throw new Error("Planner has no authorized work item to decompose.");
-	for (const task of plan.subtasks ?? []) {
-		if (!task.parentWorkItemId || !allowed.has(task.parentWorkItemId)) {
-			throw new Error(`Planner subtask ${task.id} must reference a current authorized work item.`);
-		}
-	}
-}
-
-export function authorizeProposal(state: TaskState, proposal: WorkProposal, decision: ScopeDecision, reason: string): TaskState {
-	if (state.phase !== "generate") throw new Error("Propose additional work only during active generation.");
-	for (const [label, value] of Object.entries({ expected: proposal.expected, observed: proposal.observed,
-		evidence: proposal.evidence, proposedGoal: proposal.proposedGoal, reason })) nonempty(value, label);
-	const basis = proposal.basis === "user_requirement"
-		? state.workItems.find((item) => item.id === proposal.sourceId && item.source === "user_requirement")
-		: state.workItems.find((item) => item.id === proposal.sourceId && item.source === "godot_failure");
-	if (!basis) throw new Error(`Unknown work source: ${proposal.sourceId}.`);
-	if (decision !== "required") {
-		return { ...state, suggestions: [...(state.suggestions ?? []), { proposal, decision, reason }] };
-	}
-	if (basis.status === "closed") throw new Error("A completed work item cannot be reopened by a Generator proposal.");
-	const id = `W${state.workItems.filter((item) => item.id.startsWith("W")).length + 1}`;
-	const item: WorkItem = { id, goal: proposal.proposedGoal,
-		source: proposal.basis === "user_requirement" ? "requirement_gap" : "godot_failure",
-		sourceId: basis.sourceId, parentWorkItemId: basis.id, doneWhen: proposal.expected,
-		status: "active", originEvidence: `${proposal.observed} Evidence: ${proposal.evidence}` };
-	return { ...state, workItems: [...state.workItems, item], extraWorkIds: [...(state.extraWorkIds ?? []), id] };
+	return { ...state, phase: "generate", plan: plan.subtasks, planObjective: plan.objective,
+		pendingRequirementIds: undefined, completionEvidence: undefined, plannerError: undefined };
 }
 
 export function generatorHandoff(state: TaskState): string {
 	if (state.phase !== "generate" || !state.plan.length) return "";
 	const workset = activeWorkset(state);
-	return `Generator plan: ${JSON.stringify({
-		objective: state.planObjective ?? state.goal,
-		subtasks: state.plan,
-	})}\nCurrent ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal}`).join("; ")}. Complete the whole workset, then call godot_verify once with workset_checks for every ID. If an item is unresolved, continue only that item. Suggested files are hints, not a restriction on edits; do not add optional objectives.`;
+	return `Generator plan: ${JSON.stringify({ objective: state.planObjective ?? state.goal, subtasks: state.plan })}\nCurrent ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal}`).join("; ")}. Complete the whole workset, then call godot_verify once with workset_checks for every ID. If an item is unresolved, continue only that item. Suggested files are hints, not a restriction on edits; do not add optional objectives.`;
 }
 
-export function recordCompletedWorkset(state: TaskState, checks: WorksetCheck[], fingerprint: string): TaskState {
-	const { workset, unresolved } = validateWorksetChecks(state, checks);
-	if (unresolved.length) throw new Error("Cannot record an incomplete workset as completed.");
-	const completed = new Map(checks.map(({ id, evidence }) => [id, evidence]));
-	return { ...state,
-		workItems: state.workItems.map((item) => completed.has(item.id)
-			? { ...item, status: "reported_complete", completionEvidence: completed.get(item.id) } : item),
-		solved: workset.source === "planner" ? checks.map(({ id, evidence }) => ({ id, evidence, fingerprint })) : state.solved,
-	};
-}
-
-export function finishTask(state: TaskState, checks: RequirementCheck[], fingerprint: string,
-	gapDecisions?: Record<string, ScopeDecision>): TaskState {
+export function finishTask(state: TaskState, checks: RequirementCheck[], fingerprint: string): TaskState {
 	if (state.phase !== "review") throw new Error("Finish only after a successful full-project review.");
 	if (state.lastVerification?.status !== "pass" || state.lastVerification.fingerprint !== fingerprint) {
 		throw new Error("Verify the current project files before finishing.");
@@ -384,33 +229,8 @@ export function finishTask(state: TaskState, checks: RequirementCheck[], fingerp
 		nonempty(check.evidence, `Evidence for ${check.id}`);
 		seen.add(check.id);
 	}
-	if (gapDecisions) {
-		for (const check of checks.filter((item) => item.status === "missing")) {
-			nonempty(check.expected, `Expected behavior for ${check.id}`);
-			nonempty(check.observed, `Observed behavior for ${check.id}`);
-			if (!gapDecisions[check.id]) throw new Error(`Missing scope decision for ${check.id}.`);
-		}
-		const notAuthorized = checks.filter((check) => check.status === "missing" && gapDecisions[check.id] !== "required");
-		if (notAuthorized.length) return { ...state, phase: "stopped", completionEvidence: checks,
-			plannerError: `Scope review did not authorize the proposed fix for ${notAuthorized.map((item) => item.id).join(", ")}; the original requirement remains reported missing and needs manual review.` };
-	}
-	const reviewed = checks;
-	const missing = reviewed.filter((check) => check.status === "missing").map((check) => check.id);
-	const workItems = state.workItems.map((item) => item.source === "user_requirement"
-		? { ...item, status: missing.includes(item.id) ? "active" as const : "closed" as const,
-			completionEvidence: reviewed.find((check) => check.id === item.id)?.evidence }
-		: item);
-	if (missing.length) {
-		const gaps: WorkItem[] = missing.map((id) => {
-			const check = reviewed.find((item) => item.id === id)!;
-			return { id: `G${state.attempts}-${id}`, goal: state.requirements.find((item) => item.id === id)!.text,
-				source: "requirement_gap", sourceId: id, parentWorkItemId: id, doneWhen: check.expected ?? check.evidence,
-				status: "active", originEvidence: `${check.observed ?? check.evidence} Evidence: ${check.evidence}` };
-		});
-		return { ...state, phase: "generate", plan: [], planObjective: undefined, solved: [], pendingRequirements: missing,
-			completionEvidence: reviewed, workItems: [...workItems, ...gaps], extraWorkIds: [] };
-	}
-	return { ...state, phase: "done", pendingRequirements: [], completionEvidence: reviewed,
-		workItems: workItems.map((item) => item.status === "reported_complete" ? { ...item, status: "closed" } : item) };
+	const missing = checks.filter((check) => check.status === "missing").map((check) => check.id);
+	if (missing.length) return { ...state, phase: "generate", pendingRequirementIds: missing,
+		plan: [], planObjective: undefined, completionEvidence: checks };
+	return { ...state, phase: "done", pendingRequirementIds: [], completionEvidence: checks };
 }
-import { createHash } from "node:crypto";
