@@ -67,7 +67,6 @@ Pi's current directory. From the repository root, the Godot console is at
 game/    (default project directory; an explicit path takes precedence)
   project.godot
   Main.tscn
-  demo_outputs/    ← your input traces (1–10 files)
   scripts/  scenes/  assets/
 ```
 
@@ -80,66 +79,7 @@ $projectDir = Join-Path (Get-Location).Path "game"  # use the explicit project p
 ```
 
 Use the Godot 4 command-line documentation for engine flags.
-**Engine flags like `--headless` and `--quit-after N` must come BEFORE `--`** —
-anything after `--` is forwarded to the project as user args and silently
-ignored by the engine. Correct shape:
-`& .\Godot_Engine\Godot_v4.6.2-stable_win64_console.exe --headless --quit-after 5 --path $projectDir -- --scenario near_victory`.
 
 The Linux screenshot helper is not available in this Windows workflow. Inspect visuals in the Godot editor during manual playtesting.
 
-## Demos
-
-Ship **1–10 input-trace files** under the project's `demo_outputs/` directory,
-one per demo, each named `*.json`.
-The local GameEva replayer launches a fresh game per trace and replays
-synthetic mouse and keyboard input at 1280×720. It saves replay logs, but
-does not capture or score video. Only the first 10 traces by filename are
-replayed locally.
-
-### Scenarios
-
-Normal play should start from the title screen and demonstrate the task's
-core gameplay loop.
-Demo playback must be deterministic. For demos that need a specific state
-(a specific level, combat state, upgrade screen, result state, or late-game
-setup), define named scenarios your game loads when launched with:
-
-```powershell
-& .\Godot_Engine\Godot_v4.6.2-stable_win64_console.exe --path $projectDir -- --scenario <id>
-```
-
-When `--scenario <id>` is present the game must skip menus, set up the named
-state deterministically (seed any RNG), and begin accepting input immediately.
-
-### Trace file format
-
-```json
-{
-  "scenario": "title_flow",
-  "duration_frames": 360,
-  "events": [
-    {"frame": 30,  "type": "mouse_click", "button": "left", "x": 300, "y": 360},
-    {"frame": 90,  "type": "key_press",   "keycode": "1"},
-    {"frame": 180, "type": "key_press",   "keycode": "SPACE"},
-    {"frame": 300, "type": "wait"}
-  ]
-}
-```
-
-- `scenario` — optional; omit for a normal game launch from the title screen.
-- `duration_frames` — total frames to record at 30 fps; cap at **600 (20 s)**.
-- `events` — time-ordered inputs. Coordinates are pixels in the 1280×720
-  viewport. Supported types:
-  - `mouse_click`: `{frame, type, button: "left"|"right", x, y}`
-  - `mouse_down` / `mouse_up`: `{frame, type, button: "left"|"right", x, y}` —
-    use these for drag interactions: emit `mouse_down` at the start point,
-    one or more `mouse_move` events along the way, and `mouse_up` at the end.
-    A `mouse_click` is a `mouse_down` + `mouse_up` at the same point in tight
-    succession.
-  - `mouse_move`: `{frame, type, x, y}`
-  - `key_press` / `key_down` / `key_up`: `{frame, type, keycode}` — keycodes:
-    `A`–`Z`, `0`–`9`, `ESCAPE`, `ENTER`, `SPACE`, `TAB`, `BACKSPACE`,
-    `DELETE`, `SHIFT`, `CTRL`, `ALT`, `UP`, `DOWN`, `LEFT`, `RIGHT`.
-  - `wait`: `{frame, type}` — anchor frame, no input.
-
-Replay must be deterministic: same trace, fresh launch, same outcome every time.
+Do not create demo input traces or replay scripts unless the user asks.

@@ -7,6 +7,6 @@
 
 后三题保留原文，来源与哈希见 [筛选记录](../benchmarks/gamecraft_bench_selected/README.md)。它们现在可以作为自然语言输入直接生成，但含 Linux 路径且没有本地玩法评测，不宜直接用于 Windows 比较。对应的 `*_window/` 目录另存 Windows 技术适配版，每目录有 `instruction.md`、`task.toml`、`修改说明.md`；原文件不删除、不覆盖。
 
-- `puzzle-magnet-lab_window/`、`horror-signal-lost_window/`、`keepsake_window/`：只替换 Windows 路径、Godot 命令及不可用的 Linux 截图工具说明；英文原题玩法与逐帧演示轨迹协议保留。各目录没有预置玩法断言或测试桥。生成时要求 Agent 自行提交演示轨迹；本地回放仅保存执行证据，不产生官方玩法分数。Godot 三门及回放通过仍记 `runnable_unverified`。
+- `puzzle-magnet-lab_window/`、`horror-signal-lost_window/`、`keepsake_window/`：供 Windows 游戏开发使用，保留英文原题的玩法要求，适配本地路径和 Godot 命令，并移除 Demo 轨迹交付要求。各目录没有预置玩法断言或测试桥；Godot 导入与启动通过只说明工程可运行，玩法仍需试玩。
 
 这些是 GameEva Windows 适配任务，不是上游 Harbor/多模态评分器的官方结果。
