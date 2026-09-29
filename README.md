@@ -11,3 +11,5 @@ LTGDAgentSystem\start.cmd
 扩展让 Pi 原生 Generator 直接制作游戏。Generator 结束本轮后，Executor 自动运行 Godot 导入与启动验证，再独立审查原始需求；任一检查确认失败才调用短上下文 Planner，Generator 按修复计划修改后再次交给 Executor。两项检查均通过后，任务标记为完成。验证结果保存在 Pi 任务状态中。
 
 顶层 `assets/` 是只读公共素材库，`Godot_Engine/` 是本地 Godot 4.6.2。历史 Python 实现仍在相邻的 `../GameEva/` 仓库，仅作为迁移参照，不是新入口。
+
+在 Windows 上需要查看游戏实际画面时，可用 [按帧截图助手](LTGDAgentSystem/README.md#按帧截图windows)。

@@ -13,3 +13,14 @@
 `godot_set_project` 选择工程目录并启动任务。`requirements: [{id,text}]` 仅用于用户明确给出验收项的情况；通常省略，保留完整原始目标作为 `R1`，由 Executor 读取用户提到的任务文件。`godot_inspect_project`、`godot_inspect_scene` 和 `godot_get_errors` 提供简短项目索引、场景结构和最近一次完整 Godot 错误。`godot_verify` 与 `godot_finish` 不再由 Generator 调用。`/godot-status` 可查看阶段和验证结果。
 
 Godot 验证结果只保存在 Pi 会话任务状态中，不生成 `runs/` 报告。验证指纹以 Godot 导入和运行后的工程文件为准，并排除 `.godot` 等缓存目录。相同工程指纹与相同错误重复出现，或修改后连续出现同一错误时，系统停止自动重试。状态使用 `schemaVersion: 7`；旧会话的需求、计划和验证记录会在恢复时转换。Godot PASS 仅代表导入与启动通过，需求是否满足由随后独立审查决定。
+
+## 按帧截图（Windows）
+
+Linux 任务说明中的 `/workspace/tools/screenshot.sh` 不在这个工作区。需要查看游戏画面时，可在仓库根目录运行：
+
+```powershell
+.\LTGDAgentSystem\tools\screenshot.ps1 -Project .\game -Out .\frame.png -Frames 60
+.\LTGDAgentSystem\tools\screenshot.ps1 -Project .\game -Out .\battle.png -Frames 120 -Scenario battle
+```
+
+可用 `-Scene 'res://scenes/Battle.tscn'` 指定启动场景，或用 `-GameArgs @('--difficulty', 'hard')` 向游戏传递其他参数。助手调用本地 Godot 的 Movie Maker 导出 PNG 帧，将最后一帧复制到 `-Out`，并清理临时帧。它会启动有画面的 Godot 窗口，不使用 `--headless`；场景参数会留在 `OS.get_cmdline_user_args()`。游戏须自行实现 `--scenario` 对应的状态跳转。
