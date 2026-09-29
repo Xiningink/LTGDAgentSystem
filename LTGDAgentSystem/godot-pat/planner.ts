@@ -3,7 +3,7 @@ import path from "node:path";
 import type { DecompositionPlan, Failure, TaskState } from "./controller.ts";
 import type { ProjectIndex } from "./project.ts";
 
-export const PLANNER_SYSTEM_PROMPT = `You are the Planner for a Godot game development task. The Generator's latest Godot verification failed. Analyze the original requirement, all distinct errors from this verification, and any current code excerpts. You cannot run tools or edit files. Every subtask must address an observed error from this latest formal verification; distinguish a supported diagnosis from a hypothesis. Preserve the original requirement and do not invent optional improvements.
+export const PLANNER_SYSTEM_PROMPT = `You are the Planner for a Godot game development task. The Executor found either a Godot runtime/import failure or a concrete missing original requirement. Analyze only that latest failure and the supplied project evidence. You cannot run tools or edit files. Every subtask must address the observed failure; distinguish a supported diagnosis from a hypothesis. Preserve the original requirement and do not invent optional improvements.
 
 Return one JSON object. If project files need revision, return {"decision":"revise","reason":"...","objective":"...","subtasks":[{"id":"S1","problem":"...","goal":"...","suggested_files":["res://...godot"]}]}. Subtasks must be ordered and nonempty; suggested_files is optional and only a hint. If the evidence does not support a project-code change, return {"decision":"cannot_resolve_in_project","reason":"...","evidence":["..."]} and no subtasks. Distinguish observed evidence from hypotheses. Do not prescribe exact patches or add checks or dependencies. Return JSON only.`;
 
@@ -81,7 +81,15 @@ async function currentCode(root: string, errors: Failure[]): Promise<{ excerpts:
 
 export async function plannerInput(state: TaskState, project: ProjectIndex): Promise<string> {
 	const failure = state.lastVerification;
-	if (failure?.status !== "fail") throw new Error("Planner requires a failed verification.");
+	if (failure?.status === "pass" && state.pendingRequirements?.length) {
+		return JSON.stringify({
+			original_requirement: state.goal,
+			project_overview: { main_scene: project.mainScene ?? null, scenes: project.scenes, scripts: project.scripts, total_files: project.resources },
+			missing_requirements: state.requirements.filter((item) => state.pendingRequirements?.includes(item.id)),
+			latest_requirement_failure: state.completionEvidence?.filter((check) => typeof check === "object" && check.status === "missing"),
+		});
+	}
+	if (failure?.status !== "fail") throw new Error("Planner requires a failed Executor check.");
 	const { excerpts, unavailable } = await currentCode(project.project, failure.errors);
 	return JSON.stringify({
 		original_requirement: state.goal,

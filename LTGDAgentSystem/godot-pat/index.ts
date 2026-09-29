@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { acceptPlan, activeWorkset, finishTask, generatorHandoff, newTask, recordVerification, type TaskState, type Verification } from "./controller.ts";
+import { parseReviewOutput, reviewInput, REVIEW_SYSTEM_PROMPT } from "./executor.ts";
 import { verifyProject } from "./godot.ts";
 import { parsePlannerOutput, plannerInput, PLANNER_SYSTEM_PROMPT } from "./planner.ts";
 import { inspectProject, inspectScene } from "./project.ts";
@@ -18,10 +19,6 @@ async function hasProjectFile(root: string): Promise<boolean> {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
 		throw error;
 	}
-}
-
-async function projectFingerprint(root: string): Promise<string> {
-	return (await hasProjectFile(root)) ? (await inspectProject(root)).fingerprint : "";
 }
 
 function compact(result: Verification): string {
@@ -43,15 +40,13 @@ function completeErrors(result: Verification): string {
 function nextInstruction(state: TaskState): string {
 	if (state.phase === "generate") {
 		const workset = activeWorkset(state);
-		return `Current ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal.length > 160 ? `${item.goal.slice(0, 157)}...` : item.goal}`).join("; ")}. Build these features, then call godot_verify. Use direct play or inspection during generation only when needed to implement them; do not start an open-ended polish pass.`;
+		return `Current ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal.length > 160 ? `${item.goal.slice(0, 157)}...` : item.goal}`).join("; ")}. Implement the requested game directly. When the first complete implementation is in the project, END THIS TURN. The Executor automatically verifies and reviews it. Do not run a self-review or polish cycle before handing off.`;
 	}
-	if (state.phase === "review") return `Godot import and boot passed. Read-only review: compare each original requirement (${state.requirements.map((item) => `${item.id}: ${item.text}`).join("; ")}) against the original user request, then call godot_finish with one check per ID. Mark a concrete unmet original requirement as missing. Ignore optional polish; do not edit or run shell commands in this phase.`;
+	if (state.phase === "review") return "The Executor is independently reviewing the original requirements. Wait for its result.";
 	if (state.phase === "done") return "Give the user a concise final report with the verification and requirement review evidence.";
 	if (state.phase === "stopped") return `Stop automatic retries and report the blocker: ${state.plannerError ?? "repeated identical failure"}.`;
-	return "Planner is running; wait for its structured handoff.";
+	return "The Executor is asking the Planner to repair a confirmed failure. Wait for its structured handoff.";
 }
-
-const REVIEW_READ_TOOLS = new Set(["read", "grep", "find", "ls", "godot_inspect_project", "godot_inspect_scene", "godot_get_errors"]);
 
 export default function godotPat(pi: ExtensionAPI): void {
 	let state: TaskState | undefined;
@@ -72,7 +67,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 				delete restored.integrationChecks;
 				state = {
 					...restored,
-					schemaVersion: 6,
+					schemaVersion: 7,
 					requirements: loaded.requirements?.length ? loaded.requirements : [{ id: "R1", text: loaded.goal }],
 					phase: legacyDone ? "review" : ["direct", "repair", "execute_plan"].includes(loaded.phase) ? "generate" : loaded.phase as TaskState["phase"],
 					plan: (loaded.plan ?? []).map((task) => ({
@@ -87,7 +82,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 	}
 
 	async function runPlanner(ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
-		if (!state || state.phase !== "plan" || !projectRoot) throw new Error("A failed project verification is required before planning.");
+		if (!state || state.phase !== "plan" || !projectRoot) throw new Error("A failed Executor check is required before planning.");
 		if (!ctx.model) throw new Error("No model is selected for the Planner.");
 		const overview = await inspectProject(projectRoot);
 		const input = await plannerInput(state, overview);
@@ -113,22 +108,58 @@ export default function godotPat(pi: ExtensionAPI): void {
 		throw new Error("Planner did not produce a valid plan.");
 	}
 
-	async function verify(root: string, ctx: ExtensionContext, signal?: AbortSignal): Promise<{ result: Verification; handoff: string }> {
-		if (state?.phase === "done" || state?.phase === "stopped") throw new Error("This task has ended. Start a new task before verifying again.");
-		const result = await verifyProject({ project: root, godot, signal });
-		if (state) { state = recordVerification(state, result); persist(); }
-		let handoff = result.status === "infrastructure" ? "Godot infrastructure failed. Report or resolve the environment error; this does not trigger planning." : state ? nextInstruction(state) : "";
-		if (state?.phase === "plan") {
+	async function runRequirementReview(ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
+		if (!state || state.phase !== "review" || !projectRoot) throw new Error("A current Godot PASS is required before requirement review.");
+		if (!ctx.model) throw new Error("No model is selected for the Executor review.");
+		const project = await inspectProject(projectRoot);
+		const input = await reviewInput(state, project, ctx.cwd);
+		let correction = "";
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const request: UserMessage = { role: "user", content: [{ type: "text", text: input + correction }], timestamp: Date.now() };
+			const response = await ctx.modelRegistry.streamSimple(
+				ctx.model,
+				{ systemPrompt: REVIEW_SYSTEM_PROMPT, messages: [request] },
+				{ signal, reasoning: ctx.thinkingLevel === "off" ? undefined : ctx.thinkingLevel },
+			).result();
+			if (response.stopReason !== "stop") throw new Error(`Executor review ended with ${response.stopReason}${response.errorMessage ? `: ${response.errorMessage}` : ""}.`);
+			const current = await inspectProject(projectRoot);
+			if (current.fingerprint !== project.fingerprint) throw new Error("Project changed during Executor review; re-run Godot verification.");
 			try {
-				handoff = await runPlanner(ctx, signal);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				state = { ...state, phase: "stopped", plannerError: message };
+				const raw = response.content.filter((part): part is { type: "text"; text: string } => part.type === "text").map((part) => part.text).join("\n");
+				state = finishTask(state, parseReviewOutput(raw), current.fingerprint);
 				persist();
-				handoff = nextInstruction(state);
+				return state.phase === "done" ? "Executor review PASS: every original requirement is satisfied. Task recorded as done." : `Executor review found missing original requirements: ${state.pendingRequirements?.join(", ")}.`;
+			} catch (error) {
+				if (attempt === 1) throw error;
+				correction = `\n\nYour previous JSON was rejected: ${error instanceof Error ? error.message : String(error)} Return one corrected JSON object.`;
 			}
 		}
-		return { result, handoff };
+		throw new Error("Executor did not produce a valid requirement review.");
+	}
+
+	async function runExecutor(ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
+		if (!state || !projectRoot) throw new Error("Select a Godot project first.");
+		const messages: string[] = [];
+		try {
+			if (state.phase === "generate") {
+				if (state.lastReviewFailureFingerprint && (await inspectProject(projectRoot)).fingerprint === state.lastReviewFailureFingerprint) {
+					throw new Error("The Planner returned a requirement repair, but the project has not changed. Stop instead of repeating the same review.");
+				}
+				const result = await verifyProject({ project: projectRoot, godot, signal });
+				state = recordVerification(state, result);
+				persist();
+				messages.push(compact(result));
+				if (result.status === "infrastructure") throw new Error("Godot infrastructure failed; no project repair plan was requested.");
+				if (state.phase === "stopped") messages.push(nextInstruction(state));
+			}
+			if (state.phase === "review") messages.push(await runRequirementReview(ctx, signal));
+			if (state.phase === "plan") messages.push(await runPlanner(ctx, signal));
+		} catch (error) {
+			state = { ...state, phase: "stopped", plannerError: error instanceof Error ? error.message : String(error) };
+			persist();
+			messages.push(nextInstruction(state));
+		}
+		return messages.join("\n\n");
 	}
 
 	pi.on("session_start", (_event, ctx) => {
@@ -148,15 +179,25 @@ export default function godotPat(pi: ExtensionAPI): void {
 		inputRevision++;
 	});
 
+	pi.on("agent_before_settle", async (event, ctx) => {
+		if (event.outcome !== "completed" || !state?.projectPath || !["generate", "review", "plan"].includes(state.phase)) return;
+		const report = await runExecutor(ctx, ctx.signal);
+		const continueGeneration = state?.phase === "generate";
+		return {
+			entries: [...event.entries, { type: "custom_message" as const, customType: "ltgd-executor", content: report, display: true }],
+			continue: continueGeneration,
+		};
+	});
+
 	pi.on("tool_call", (event) => {
 		if (!state?.projectPath) return;
 		if (inputRevision > selectedInputRevision && event.toolName === "godot_set_project") return;
 		if (inputRevision > selectedInputRevision && (state.phase === "done" || state.phase === "stopped")) return;
-		if (state.phase === "review" && event.toolName !== "godot_finish" && !REVIEW_READ_TOOLS.has(event.toolName)) {
-			return { block: true, terminate: true, reason: "Godot passed. Review the original requirements with read-only tools and call godot_finish. Edits and shell commands are blocked until a concrete original requirement is marked missing." };
+		if (state.phase === "review") {
+			return { block: true, terminate: true, reason: "The Executor owns requirement review. Wait for its result." };
 		}
-		if (state.phase === "plan" && event.toolName !== "godot_verify" && event.toolName !== "godot_get_errors") {
-			return { block: true, terminate: true, reason: "A failed Godot verification is awaiting Planner. Call godot_verify to resume it." };
+		if (state.phase === "plan") {
+			return { block: true, terminate: true, reason: "The Planner owns this confirmed failure. Wait for its structured repair plan." };
 		}
 		if (state.phase === "done" || state.phase === "stopped") {
 			return { block: true, terminate: true, reason: "This LTGD task has ended. Report the result and wait for a new user request." };
@@ -170,11 +211,12 @@ export default function godotPat(pi: ExtensionAPI): void {
 		}
 		return { systemPrompt: event.systemPrompt + `\n\nWhen working on the selected LTGD Godot game, follow this workflow; for unrelated requests, use Pi normally:
 - You are the Generator. Keep Pi's current directory. The selected project is ${state.projectPath}.
-- Use godot_inspect_project and godot_inspect_scene for concise context. Read raw files only for edits. Keep all project files inside the selected directory.
-- Build the current features directly. You may run or inspect the game during generation when needed. When they are implemented, call godot_verify once. Do not start an open-ended polish pass. Only a formal Godot verification failure lets the Controller call the isolated, short-context Planner. Implement its whole repair plan before verifying again; do not call a separate planning tool.
-- If a session resumes with a pending plan, call godot_verify to resume planning without another Godot run.
-- A Godot pass proves import and headless boot only. Review every original requirement and call godot_finish before claiming completion. After a pass, the Controller blocks edits and shell commands. A specific missing original requirement returned by godot_finish reopens generation.
-- Do not modify shared assets/ or Godot_Engine/.` };
+- Build the game from the user's original task immediately. Do not write an upfront plan, break the task into a long checklist, request a Planner, or create optional objectives. Make only the local implementation decisions needed to code.
+- Implement the complete requested player flow in one focused pass. Read files and run Godot during development only to resolve a concrete implementation blocker. Do not start repeated screenshot, self-test, refactor, visual polish, or minor-issue cycles.
+- A flaw you noticed yourself is not a new work item. Fix it now only if it prevents an explicit original requirement or the main player flow from working; otherwise stop and let the Executor review the project.
+- After the requested implementation is present, STOP using tools and end this Generator turn. The Executor automatically performs Godot import, boot, and independent requirement review. Do not call a verification or finish tool, and do not claim the whole task is done before the Executor reports.
+- If the Executor returns a confirmed failure and a Planner handoff, implement only those repair subtasks, then end the turn again. Do not expand the plan into optional improvements.
+- Use godot_inspect_project and godot_inspect_scene for concise context. Keep all project files inside the selected directory. Do not modify shared assets/ or Godot_Engine/.` };
 	});
 
 	pi.on("context_with_system", (event) => {
@@ -191,11 +233,11 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "godot_set_project", label: "Select Godot project",
-		description: "Activate a Godot game task and select its output directory. Omit project to use game/ under Pi's current directory. Group original requirements into a few cohesive game features or player experiences, preserving concrete details; do not create separate items for every sentence, process instruction, or vague polish goal. If omitted, the full goal becomes one requirement. Set new_task only after a new user request to start another game; an active task's requirements cannot be replaced.",
+		description: "Activate a Godot game task and select its output directory. Omit project to use game/ under Pi's current directory. Do not decompose the task before coding. Omit requirements unless the user supplied an explicit acceptance list; otherwise the full original goal is R1. Set new_task only after a new user request to start another game.",
 		parameters: Type.Object({
 			project: Type.Optional(Type.String({ description: "User-specified project or output directory; relative paths start from Pi's current directory" })),
 			new_task: Type.Optional(Type.Boolean({ description: "Start a new Godot game task even if another project is active" })),
-			requirements: Type.Optional(Type.Array(Type.Object({ id: Type.String(), text: Type.String() }), { description: "Stable IDs for cohesive original game features or player experiences; include their concrete details without splitting every clause into an item" })),
+			requirements: Type.Optional(Type.Array(Type.Object({ id: Type.String(), text: Type.String() }), { description: "Only explicit user-supplied acceptance criteria; do not invent a detailed requirement breakdown" })),
 		}),
 		executionMode: "sequential",
 		async execute(_id, params, _signal, _update, ctx) {
@@ -239,58 +281,11 @@ export default function godotPat(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
-		name: "godot_verify", label: "Verify Godot project",
-		description: "Run formal Godot import and headless boot. On failure, the Controller requests a short-context repair plan; on pass, review the original requirements.",
-		parameters: Type.Object({}), executionMode: "sequential",
-		async execute(_id, _params, signal, _update, ctx) {
-			if (!(await hasProjectFile(projectRoot))) throw new Error(`No project.godot in ${projectRoot || "a selected directory"}. Select or create the project first.`);
-			if (!state) throw new Error("Select an active Godot task first.");
-			if (state?.phase === "done" || state?.phase === "stopped") throw new Error("This task has ended. Start a new task before verifying again.");
-			if (state.phase === "plan" && state.lastVerification?.status === "fail") {
-				const previous = state.lastVerification;
-				let handoff: string;
-				try { handoff = await runPlanner(ctx, signal); }
-				catch (error) {
-					state = { ...state, phase: "stopped", plannerError: error instanceof Error ? error.message : String(error) };
-					persist();
-					handoff = nextInstruction(state);
-				}
-				return { content: [{ type: "text", text: `${compact(previous)}\n${handoff}` }], details: previous };
-			}
-			if (state.phase === "review") throw new Error("Godot has passed. Review the original requirements with godot_finish before doing more work.");
-			if (state.pendingRequirements?.length && state.lastVerification?.status === "pass" && await projectFingerprint(projectRoot) === state.lastVerification.fingerprint) {
-				return { content: [{ type: "text", text: `No project files changed since review found missing requirements. ${nextInstruction(state)}` }], details: state.lastVerification };
-			}
-			const { result, handoff } = await verify(projectRoot, ctx, signal);
-			return { content: [{ type: "text", text: `${compact(result)}\n${handoff}` }], details: result };
-		},
-	});
-
-	pi.registerTool({
 		name: "godot_get_errors", label: "Last Godot errors",
 		description: "Return all errors from the last Godot verification without running Godot again.",
 		parameters: Type.Object({}),
 		async execute() {
 			return { content: [{ type: "text", text: state?.lastVerification ? completeErrors(state.lastVerification) : "No verification has run in this task." }], details: {} };
-		},
-	});
-
-	pi.registerTool({
-		name: "godot_finish", label: "Complete verified game task",
-		description: "Review every original requirement after Godot passes. Missing items return the task to generation; otherwise finish with concrete evidence.",
-		executionMode: "sequential",
-		parameters: Type.Object({ checks: Type.Array(Type.Object({
-			id: Type.String({ description: "Original requirement ID" }),
-			status: Type.Union([Type.Literal("implemented"), Type.Literal("missing")]),
-			evidence: Type.String({ description: "Specific implementation evidence or missing behavior" }),
-		})) }),
-		async execute(_id, params) {
-			if (!state || !projectRoot) throw new Error("Select an active project first.");
-			const current = await inspectProject(projectRoot);
-			state = finishTask(state, params.checks, current.fingerprint);
-			persist();
-			if (state.phase === "generate") return { content: [{ type: "text", text: `Review found missing original requirements. ${nextInstruction(state)}` }], details: { missing: state.pendingRequirements ?? [] } };
-			return { content: [{ type: "text", text: "Task recorded as done. Report implemented behavior and Godot verification evidence." }], details: { missing: [] as string[] } };
 		},
 	});
 

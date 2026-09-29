@@ -1,21 +1,15 @@
 # Godot-PaT extension
 
-先在命令行进入希望作为工作目录的文件夹，再调用 CMD 启动脚本，进入 Pi 后直接用自然语言描述需求。例如从仓库根目录启动：
+在希望作为工作目录的文件夹运行 `LTGDAgentSystem\start.cmd`，然后直接在 Pi 对话中描述游戏。脚本调用已安装的 `pi` 并加载 `godot-pat/index.ts`；正常使用不需要本地 `PiAgent/`。用户指定输出目录时直接使用该目录，否则在 Pi 当前目录创建 `game/`。顶层 `assets/` 和 `Godot_Engine/` 是共享输入，不由 Generator 修改。
 
-```cmd
-LTGDAgentSystem\start.cmd
-```
+系统分为三个角色：
 
-`start.cmd` 调用系统中已安装的 `pi` 命令，只额外加载 `godot-pat/index.ts`，并保留启动时的当前目录；正常运行不依赖 `PiAgent/`。扩展在编辑前调用一次 `godot_set_project`：用户指定了输出路径就使用该路径；未指定时在当前目录下创建 `game/`，把 `project.godot` 等工程文件放在其中。相对输出路径以 Pi 的当前目录为基准。模型和会话由已安装的 Pi 管理。
+- **Generator** 是 Pi 原生编码 Agent。它直接实现原始需求，不在失败前输出正式计划或细分工单。首版实现写入工程后结束本轮；修复轮只实现 Planner 返回的子任务，然后再次结束本轮。开发时可以针对具体阻碍运行和查看游戏，但不做开放式自检、截图迭代或可选 polish。
+- **Executor** 在 Pi 的 `agent_before_settle` 边界自动接管，无需 Generator 记住调用验证工具。它先在选定工程运行 Godot 结构检查、导入和无头启动。通过后，再用独立、短上下文的模型请求审查原始用户需求、提到的任务文件以及当前工程内容。审查只返回 `implemented` 或 `missing`；明确要求缺失或预期玩家流程无法工作才算失败。仅凭主观 polish 建议不得开启修复。运行和需求审查都通过时记为 `done`。
+- **Planner** 仅在 Executor 确认 Godot 失败或原始需求缺失后调用。它接收本次错误或缺项、相关工程证据及原始目标，输出针对该失败的最小结构化修复计划；它不能编辑工程，也不能添加可选目标。无法根据证据修复时，流程停止并说明原因。
 
-扩展提供 `godot_set_project`、`godot_inspect_project`、`godot_inspect_scene`、`godot_verify`、`godot_get_errors` 和最终的 `godot_finish`。加载扩展不会限制 Pi 的普通读写和命令工具；只有调用 `godot_set_project` 选择项目后才启用游戏任务状态。在同一会话收到新的用户请求、开始另一个游戏时，可用 `godot_set_project` 的 `new_task` 参数重新选择；重复选择不会改写当前任务的需求。Pi 的原生读写工具继续负责编辑。选项目时可同时提交从原始需求提炼的 `requirements: [{id,text}]`：按完整玩法、界面或体验分组，保留具体要求，不把每句话、操作步骤或笼统的“更精致”拆成独立项；不提交时以完整原始目标作为单条 `R1`。清单固定在当前任务状态中，完成复查使用这些 ID。模型仍须对照原始需求，防止最初提炼时漏项。
+流程是 `Generator → Executor（Godot → 需求审查）→ done`；任一检查失败则 `Executor → Planner → Generator → Executor`。Executor 和 Planner 不继承 Generator 的整段对话。项目文件是共享事实来源；修复计划作为简短交接返回 Pi，Generator 的 Pi 会话仍然保留自身历史。自动交接解决了 Generator 结束本轮却忘记验证的问题；它不能强制中断尚未结束的 Generator 轮次，生成阶段的及时收手仍取决于明确提示词。
 
-主流程是 Generator 直接制作游戏 → 完成当前功能后显式调用 Godot 验证；验证失败时调用 Planner；Generator 根据整份计划修改后统一复验；验证通过后只读复查原始需求并总结。当前工作集从状态推导：首次开发取原始 `requirements`，Planner 交接后取整份 `plan`，review 发现遗漏后只取 `pendingRequirements`。生成阶段可以运行游戏和检查实现，但不应在功能已完成后开启无明确目标的 polish 循环。`godot_verify` 不要求 Generator 自报逐项完成证据。Agent 结束时不会自动验证；恢复到待规划状态时，再调用 `godot_verify` 会直接继续规划，不重复运行 Godot。同一工程指纹和同一组错误再次出现时停止自动重试；代码连续改变两次但同一组错误完全不变时也停止，并报告阻塞原因。错误组变化或减少仍视为进展。
+`godot_set_project` 选择工程目录并启动任务。`requirements: [{id,text}]` 仅用于用户明确给出验收项的情况；通常省略，保留完整原始目标作为 `R1`，由 Executor 读取用户提到的任务文件。`godot_inspect_project`、`godot_inspect_scene` 和 `godot_get_errors` 提供简短项目索引、场景结构和最近一次完整 Godot 错误。`godot_verify` 与 `godot_finish` 不再由 Generator 调用。`/godot-status` 可查看阶段和验证结果。
 
-Planner 是一次独立模型请求，不共享 Generator 的长对话。它接收原始需求、本次 Verification 的全部不同错误、错误位置附近的当前项目代码及简短项目概要；不提供文件编辑工具。每个 Planner 子任务应针对本次正式 Verification 观察到的错误，不增加可选目标。源码片段仅在本次请求中读取，不写进长期状态。Planner 返回 JSON 决策：`revise` 带 `reason`、总体目标 `objective` 和有序 `subtasks`；每个子任务包含 `id`、`problem`、`goal`，可选 `suggested_files` 仅作文件提示。若当前证据无法支持修改工程，返回 `cannot_resolve_in_project`、原因和验证证据；扩展停止自动修改并报告阻塞，而不是把失败当作通过。格式错误时至多重试一次。Planner 使用当前 Pi 模型及其推理档位。
-
-验证通过后进入 `review`，Controller 只允许读取、检查以及 `godot_finish`，阻止编辑和 shell 命令。`godot_finish` 接受每个固定需求 ID 的一条 `checks`：`implemented` 或 `missing`，每项附具体证据。存在 `missing` 时返回 `generate`，只继续实现这些原始缺项；修复后重新运行正式 Godot 验证。工程未变化时不会为了这些缺项重复运行 Godot。没有缺项，且工程指纹仍与最近一次成功验证一致时才记为 `done`。此处的 Godot“通过”仅指导入与启动，需求审查负责判断原始要求。状态使用 `schemaVersion: 6`；旧会话缺少需求清单时以原始目标作为 `R1`，无版本且无完成证据的旧 `done` 恢复为 `review`，已完成的新版任务保持完成。
-
-验证直接在选定的游戏目录运行 Godot 导入与无头启动；Godot 可能在该目录生成 `.godot` 导入缓存。Verification 结果返回给 Pi 并保存在任务状态中，不创建 `runs/` 报告或日志。`godot_verify` 的简短结果只显示部分错误并标明总数；`godot_get_errors` 可读取本次保存的全部错误，Planner 也接收全部不同错误。Godot 正常退出时若仅报告 `ERROR: N resources still in use at exit`，它作为非阻断的退出清理诊断显示，不触发 Planner；其他脚本或导入错误仍会失败，进程非零退出也仍视为失败。若 Godot 非零退出却没有识别出的错误，结果会附带末尾输出用于诊断。工程指纹覆盖选定项目中除缓存和工具目录外的全部普通文件，包括图片、音频等素材。`PASS` 只代表导入与启动成功，**不代表玩法、视觉或需求全部通过**；`godot_finish` 根据项目证据复查原始需求。外部玩法 validator 尚未接入，也不会因 Planner 判断“无需修改”而被自动改判通过。
-
-`/godot-status` 查看当前阶段及最近一次验证。运行需要命令行可调用的 `pi` 和顶层 `Godot_Engine/Godot_v4.6.2-stable_win64_console.exe`。
+Godot 验证结果只保存在 Pi 会话任务状态中，不生成 `runs/` 报告。验证指纹以 Godot 导入和运行后的工程文件为准，并排除 `.godot` 等缓存目录。相同工程指纹与相同错误重复出现，或修改后连续出现同一错误时，系统停止自动重试。状态使用 `schemaVersion: 7`；旧会话的需求、计划和验证记录会在恢复时转换。Godot PASS 仅代表导入与启动通过，需求是否满足由随后独立审查决定。

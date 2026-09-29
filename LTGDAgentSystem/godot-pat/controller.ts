@@ -51,7 +51,7 @@ export interface DecompositionPlan {
 }
 
 export interface TaskState {
-	schemaVersion: 6;
+	schemaVersion: 7;
 	goal: string;
 	requirements: Requirement[];
 	pendingRequirements?: string[];
@@ -62,6 +62,7 @@ export interface TaskState {
 	unchangedFailureStreak?: number;
 	lastFingerprint?: string;
 	lastVerification?: Verification;
+	lastReviewFailureFingerprint?: string;
 	plan: Subtask[];
 	planObjective?: string;
 	completionEvidence?: RequirementCheck[] | string[];
@@ -78,7 +79,7 @@ export function newTask(goal: string, requirements?: Requirement[]): TaskState {
 		if (seen.has(item.id)) throw new Error("Requirement IDs must be unique.");
 		seen.add(item.id);
 	}
-	return { schemaVersion: 6, goal, requirements: selected, phase: "generate", attempts: 0, plan: [] };
+	return { schemaVersion: 7, goal, requirements: selected, phase: "generate", attempts: 0, plan: [] };
 }
 
 export function recordVerification(state: TaskState, result: Verification): TaskState {
@@ -158,7 +159,7 @@ export function generatorHandoff(state: TaskState): string {
 	return `Generator plan: ${JSON.stringify({
 		objective: state.planObjective ?? state.goal,
 		subtasks: state.plan,
-	})}\nCurrent ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal}`).join("; ")}. Complete the plan, then call godot_verify. Suggested files are hints, not a restriction on edits; do not add optional objectives.`;
+	})}\nCurrent ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal}`).join("; ")}. Implement only this repair plan, then end the Generator turn. The Executor will verify automatically. Suggested files are hints, not a restriction on edits; do not add optional objectives.`;
 }
 
 export function finishTask(state: TaskState, checks: RequirementCheck[], fingerprint: string): TaskState {
@@ -177,7 +178,7 @@ export function finishTask(state: TaskState, checks: RequirementCheck[], fingerp
 		seen.add(check.id);
 	}
 	const missing = checks.filter((check) => check.status === "missing").map((check) => check.id);
-	if (missing.length) return { ...state, phase: "generate", plan: [], planObjective: undefined, pendingRequirements: missing, completionEvidence: checks };
-	return { ...state, phase: "done", pendingRequirements: [], completionEvidence: checks };
+	if (missing.length) return { ...state, phase: "plan", plan: [], planObjective: undefined, pendingRequirements: missing, completionEvidence: checks, lastReviewFailureFingerprint: fingerprint };
+	return { ...state, phase: "done", pendingRequirements: [], completionEvidence: checks, lastReviewFailureFingerprint: undefined };
 }
 import { createHash } from "node:crypto";

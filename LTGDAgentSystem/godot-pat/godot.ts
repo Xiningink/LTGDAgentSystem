@@ -116,36 +116,37 @@ function exitFailure(stage: string, result: CommandResult): Failure {
 export async function verifyProject(options: VerifyOptions): Promise<Verification> {
 	const index = await inspectProject(options.project);
 	const base: Verification = { status: "fail", stage: "structure", errors: [], score: 0, fingerprint: index.fingerprint };
+	const current = async (result: Verification): Promise<Verification> => ({ ...result, fingerprint: (await inspectProject(options.project)).fingerprint });
 	if (!index.scenes.length || !index.mainScene) {
 		base.errors = [{ stage: "structure", message: !index.scenes.length ? "No .tscn scene found." : "project.godot has no run/main_scene." }];
-		return base;
+		return current(base);
 	}
 	try {
 		await fs.access(options.godot);
 	} catch {
-		return { ...base, status: "infrastructure", stage: "godot", errors: [{ stage: "godot", message: `Godot executable not found: ${options.godot}` }] };
+		return current({ ...base, status: "infrastructure", stage: "godot", errors: [{ stage: "godot", message: `Godot executable not found: ${options.godot}` }] });
 	}
 	const editor = await runCommand(options.godot, ["--headless", "--path", options.project, "--editor", "--quit"], 60_000, "import", options.signal);
 	if (editor.error || editor.timedOut) {
-		return { ...base, status: "infrastructure", stage: "import", errors: [{ stage: "import", message: editor.error ?? "Godot import timed out." }] };
+		return current({ ...base, status: "infrastructure", stage: "import", errors: [{ stage: "import", message: editor.error ?? "Godot import timed out." }] });
 	}
 	const importDiagnostics = classifyGodotDiagnostics(editor.errors);
 	if (editor.exitCode !== 0 || importDiagnostics.blocking.length) {
-		return { ...base, stage: "import", errors: importDiagnostics.blocking.length ? importDiagnostics.blocking : [exitFailure("import", editor)], warnings: importDiagnostics.warnings };
+		return current({ ...base, stage: "import", errors: importDiagnostics.blocking.length ? importDiagnostics.blocking : [exitFailure("import", editor)], warnings: importDiagnostics.warnings });
 	}
 	base.score = 5;
 	base.warnings = importDiagnostics.warnings;
 	if (options.runGame !== false) {
 		const game = await runCommand(options.godot, ["--headless", "--path", options.project, "--quit-after", "60"], 25_000, "runtime", options.signal);
 		if (game.error || game.timedOut) {
-			return { ...base, status: "infrastructure", stage: "runtime", errors: [{ stage: "runtime", message: game.error ?? "Godot runtime timed out." }] };
+			return current({ ...base, status: "infrastructure", stage: "runtime", errors: [{ stage: "runtime", message: game.error ?? "Godot runtime timed out." }] });
 		}
 		const runtimeDiagnostics = classifyGodotDiagnostics(game.errors);
 		const warnings = [...importDiagnostics.warnings, ...runtimeDiagnostics.warnings];
 		if (game.exitCode !== 0 || runtimeDiagnostics.blocking.length) {
-			return { ...base, stage: "runtime", errors: runtimeDiagnostics.blocking.length ? runtimeDiagnostics.blocking : [exitFailure("runtime", game)], warnings };
+			return current({ ...base, stage: "runtime", errors: runtimeDiagnostics.blocking.length ? runtimeDiagnostics.blocking : [exitFailure("runtime", game)], warnings });
 		}
 		base.warnings = warnings;
 	}
-	return { ...base, status: "pass", stage: options.runGame === false ? "import" : "runtime", score: options.runGame === false ? 5 : 10 };
+	return current({ ...base, status: "pass", stage: options.runGame === false ? "import" : "runtime", score: options.runGame === false ? 5 : 10 });
 }

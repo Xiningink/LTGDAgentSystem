@@ -7,6 +7,7 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { acceptPlan, activeWorkset, finishTask, generatorHandoff, newTask, recordVerification, type DecompositionPlan, type TaskState, type Verification } from "../godot-pat/controller.ts";
 import { classifyGodotDiagnostics, parseGodotErrors, verifyProject } from "../godot-pat/godot.ts";
+import { parseReviewOutput, reviewInput, REVIEW_SYSTEM_PROMPT } from "../godot-pat/executor.ts";
 import godotPat from "../godot-pat/index.ts";
 import { parsePlannerOutput, plannerInput } from "../godot-pat/planner.ts";
 import { inspectProject, inspectScene } from "../godot-pat/project.ts";
@@ -102,7 +103,7 @@ test("first failed verification plans immediately; one full-plan pass enters rev
 	}
 });
 
-test("review checks fixed requirements and sends only missing work back to generation", () => {
+test("review checks fixed requirements and sends only real gaps to Planner", () => {
 	const requirements = [{ id: "R1", text: "Start menu" }, { id: "R2", text: "Signal collection" }];
 	assert.throws(() => newTask("Game", [{ id: "R1", text: "Menu" }, { id: "R1", text: "Duplicate" }]), /unique/);
 	assert.deepEqual(activeWorkset(newTask("Game", requirements)), { source: "user", items: [{ id: "R1", goal: "Start menu" }, { id: "R2", goal: "Signal collection" }] });
@@ -116,14 +117,14 @@ test("review checks fixed requirements and sends only missing work back to gener
 		{ id: "R1", status: "implemented", evidence: "Menu scene" },
 		{ id: "R2", status: "missing", evidence: "No collection interaction" },
 	], "current");
-	assert.equal(missing.phase, "generate");
+	assert.equal(missing.phase, "plan");
 	assert.deepEqual(missing.pendingRequirements, ["R2"]);
-	assert.deepEqual(activeWorkset(missing), { source: "review", items: [{ id: "R2", goal: "Signal collection" }] });
 	assert.equal(missing.plan.length, 0);
+	assert.equal(missing.lastReviewFailureFingerprint, "current");
 	assert.throws(() => finishTask(missing, [], "current"), /successful full-project review/);
-	const failedAfterGap = recordVerification(missing, { status: "fail", stage: "import", errors: [{ stage: "import", message: "parse error" }], score: 0, fingerprint: "changed" });
-	const plannedAfterGap = acceptPlan(failedAfterGap, { decision: "revise", reason: "Import broke during the missing requirement", objective: "Restore import", subtasks: [{ id: "S1", problem: "Parse error", goal: "Import cleanly" }] });
+	const plannedAfterGap = acceptPlan(missing, { decision: "revise", reason: "Signal collection is absent", objective: "Implement signal collection", subtasks: [{ id: "S1", problem: "Original R2 missing", goal: "Add the interaction" }] });
 	assert.equal(plannedAfterGap.pendingRequirements, undefined, "the Planner handoff should take priority after a failed repair");
+	assert.deepEqual(activeWorkset(plannedAfterGap), { source: "planner", items: [{ id: "S1", goal: "Add the interaction" }] });
 	const done = finishTask(reviewed, [
 		{ id: "R1", status: "implemented", evidence: "Menu scene" },
 		{ id: "R2", status: "implemented", evidence: "Collection interaction exists" },
@@ -268,13 +269,11 @@ test("a malformed isolated Planner response gets one bounded retry", async () =>
 			sessionManager: { getBranch: () => [{ type: "custom", customType: "godot-pat-state", data: saved }] },
 		};
 		await handlers.get("session_start")?.({}, ctx);
-		await handlers.get("before_agent_start")?.({ prompt: "List unrelated files", systemPrompt: "BASE" }, ctx);
-		assert.equal(calls, 0, "unrelated requests must not resume a pending Planner automatically");
-		type TestTool = { execute: (id: string, params: object, signal?: undefined, update?: undefined, context?: object) => Promise<{ content: { text: string }[] }> };
-		const resumed = await (tools.get("godot_verify") as TestTool).execute("resume-plan", {}, undefined, undefined, ctx);
+		const resumed = await handlers.get("agent_before_settle")?.({ outcome: "completed", entries: [] }, ctx) as { entries: { content: string }[]; continue: boolean };
 		assert.equal(calls, 2);
 		assert.equal(entries.at(-1)?.phase, "generate");
-		assert.match(resumed.content[0].text, /Generator plan/);
+		assert.match(resumed.entries.at(-1)?.content ?? "", /Generator plan/);
+		assert.equal(resumed.continue, true);
 	} finally {
 		if (!root.startsWith(os.tmpdir() + path.sep)) throw new Error("Refusing to remove a non-temporary project directory.");
 		await fs.rm(root, { recursive: true, force: true });
@@ -304,36 +303,30 @@ test("a no-code-change Planner decision stops automatic edits without claiming v
 			sessionManager: { getBranch: () => [{ type: "custom", customType: "godot-pat-state", data: { ...newTask("Build a game"), projectPath: root } }] },
 		};
 		await handlers.get("session_start")?.({}, ctx);
-		type TestTool = { execute: (id: string, params: object, signal?: undefined, update?: undefined, context?: object) => Promise<{ content: { text: string }[] }> };
-		const verify = tools.get("godot_verify") as TestTool;
-		const result = await verify.execute("verify", {}, undefined, undefined, ctx);
+		const result = await handlers.get("agent_before_settle")?.({ outcome: "completed", entries: [] }, ctx) as { entries: { content: string }[]; continue: boolean };
 		assert.equal(calls, 1);
-		assert.match(result.content[0].text, /Stop automatic retries/);
-		assert.doesNotMatch(result.content[0].text, /Generator plan/);
+		assert.match(result.entries.at(-1)?.content ?? "", /Stop automatic retries/);
+		assert.doesNotMatch(result.entries.at(-1)?.content ?? "", /Generator plan/);
+		assert.equal(result.continue, false);
 		assert.equal(entries.at(-1)?.phase, "stopped");
 		assert.equal(entries.at(-1)?.lastVerification?.status, "fail");
-		await assert.rejects(() => verify.execute("verify-again", {}, undefined, undefined, ctx), /task has ended/);
+		assert.equal(await handlers.get("agent_before_settle")?.({ outcome: "completed", entries: [] }, ctx), undefined);
 	} finally {
 		if (!root.startsWith(os.tmpdir() + path.sep)) throw new Error("Refusing to remove a non-temporary project directory.");
 		await fs.rm(root, { recursive: true, force: true });
 	}
 });
 
-test("failed verification calls a short-context Planner and hands its whole plan to Generator", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-plan-handoff-"));
+test("Executor automatically verifies, reviews, and plans only confirmed failures", async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-executor-loop-"));
 	try {
 		await fs.writeFile(path.join(root, "project.godot"), 'config_version=5\n\n[application]\nrun/main_scene="res://Main.tscn"\n');
 		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 		const tools = new Map<string, unknown>();
 		const entries: TaskState[] = [];
-		let plannerCalls = 0;
-		let plannerRequest = "";
-		const initial = { ...newTask("Build a complete game"), projectPath: root, solved: [{ id: "S-old", evidence: "Old self-report", fingerprint: "old" }] };
-		const decomposition: DecompositionPlan = {
-			decision: "revise", reason: "Main scene is missing",
-			objective: "Make the game boot and navigate",
-			subtasks: [{ id: "S1", problem: "Main scene is missing", goal: "Create main scene", suggested_files: ["Main.tscn"] }],
-		};
+		const requests: { systemPrompt: string; input: string }[] = [];
+		let reviewCalls = 0;
+		const initial = { ...newTask("Build a game with signal scanning"), projectPath: root, solved: [{ id: "old", evidence: "self-report", fingerprint: "old" }] };
 		godotPat({
 			on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(name, handler); },
 			registerTool(tool: { name: string }) { tools.set(tool.name, tool); },
@@ -342,81 +335,98 @@ test("failed verification calls a short-context Planner and hands its whole plan
 		} as unknown as ExtensionAPI);
 		const ctx = {
 			cwd: root, model: { provider: "test", id: "mock" }, thinkingLevel: "off",
-			modelRegistry: { streamSimple(_model: unknown, request: { messages: { content: { text: string }[] }[] }, options: { reasoning?: string }) {
-				plannerCalls++;
-				plannerRequest = request.messages[0].content[0].text;
-				assert.equal(options.reasoning, undefined);
-				return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: JSON.stringify(decomposition) }] }) };
+			modelRegistry: { streamSimple(_model: unknown, request: { systemPrompt: string; messages: { content: { text: string }[] }[] }) {
+				const input = request.messages[0].content[0].text;
+				requests.push({ systemPrompt: request.systemPrompt, input });
+				const review = request.systemPrompt === REVIEW_SYSTEM_PROMPT;
+				const output = review
+					? { checks: [{ id: "R1", status: reviewCalls++ === 0 ? "missing" : "implemented", evidence: reviewCalls === 1 ? "The scan action is absent" : "Game.gd defines scan()" }] }
+					: { decision: "revise", reason: "Repair the latest Executor failure", objective: "Make the requested game work", subtasks: [{ id: "S1", problem: "Latest confirmed failure", goal: "Repair only that failure" }] };
+				return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: JSON.stringify(output) }] }) };
 			} },
 			sessionManager: { getBranch: () => [{ type: "custom", customType: "godot-pat-state", data: initial }] },
 		};
 		await handlers.get("session_start")?.({}, ctx);
-		type TestTool = { execute: (id: string, params: object, signal?: undefined, update?: undefined, context?: object) => Promise<{ content: { text: string }[] }> };
-		const tool = tools.get("godot_verify") as TestTool;
-		const result = await tool.execute("verify-fail", {}, undefined, undefined, ctx);
-		assert.equal(plannerCalls, 1);
-		assert.equal("usage" in result, false);
-		assert.equal("solved" in (entries.at(-1) ?? {}), false, "old self-reports are discarded when a session resumes");
-		assert.deepEqual(Object.keys(JSON.parse(plannerRequest)), ["original_requirement", "project_overview", "latest_failure", "current_code", "code_unavailable"]);
-		assert.match(result.content[0].text, /"problem":"Main scene is missing"/);
+		assert.equal(tools.has("godot_verify"), false);
+		assert.equal(tools.has("godot_finish"), false);
+		const prompt = await handlers.get("before_agent_start")?.({ prompt: "Build the game", systemPrompt: "BASE" }, ctx) as { systemPrompt: string };
+		assert.match(prompt.systemPrompt, /STOP using tools and end this Generator turn/);
+		const settle = async () => handlers.get("agent_before_settle")?.({ outcome: "completed", entries: [] }, ctx) as Promise<{ entries: { content: string }[]; continue: boolean }>;
+		assert.equal(await handlers.get("agent_before_settle")?.({ outcome: "aborted", entries: [] }, ctx), undefined);
+		const first = await settle();
+		assert.equal(first.continue, true);
+		assert.match(first.entries.at(-1)?.content ?? "", /Godot FAIL/);
+		assert.match(first.entries.at(-1)?.content ?? "", /Generator plan/);
 		assert.equal(entries.at(-1)?.phase, "generate");
-		assert.equal(tools.has("godot_plan"), false);
-		assert.equal(tools.has("godot_subtask_done"), false);
-		const system = { role: "system", content: "BASE", timestamp: Date.now() };
-		const phase = await handlers.get("context_with_system")?.({ messages: [system] }, ctx) as { messages: { sections: Record<string, string> }[] };
-		assert.match(phase.messages[0].sections["ltgd-current-state"], /Current planner workset: S1: Create main scene/);
-		assert.doesNotMatch(phase.messages[0].sections["ltgd-current-state"], /"problem"/);
-		await fs.writeFile(path.join(root, "Main.tscn"), '[gd_scene format=3]\n\n[node name="Main" type="Node"\n');
-		await handlers.get("agent_end")?.({}, ctx);
-		assert.equal(plannerCalls, 1, "plan execution must not auto-verify at agent_end");
-		const secondFailure = await tool.execute("verify-fail-again", {}, undefined, undefined, ctx);
-		assert.match(secondFailure.content[0].text, /Godot FAIL/);
-		assert.equal(plannerCalls, 2);
-		assert.equal(entries.at(-1)?.phase, "generate");
-		await fs.writeFile(path.join(root, "Main.tscn"), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
-		const pass = await tool.execute("verify-pass", {}, undefined, undefined, ctx);
-		assert.match(pass.content[0].text, /Godot PASS/);
-		assert.equal(plannerCalls, 2);
-		assert.equal(entries.at(-1)?.phase, "review");
 		assert.equal("solved" in (entries.at(-1) ?? {}), false);
-		const reviewPhase = await handlers.get("context_with_system")?.({ messages: phase.messages }, ctx) as { messages: { sections: Record<string, string> }[] };
-		assert.match(reviewPhase.messages[0].sections["ltgd-current-state"], /Phase: review/);
-		assert.equal(Object.keys(reviewPhase.messages[0].sections).filter((key) => key === "ltgd-current-state").length, 1);
-		const savedAttempts = entries.at(-1)?.attempts;
-		const guard = handlers.get("tool_call") as (event: { toolName: string }, ctx: object) => { block: boolean; terminate: boolean } | undefined;
-		for (const name of ["write", "edit", "bash", "godot_verify"]) {
-			assert.deepEqual({ block: guard({ toolName: name }, ctx)?.block, terminate: guard({ toolName: name }, ctx)?.terminate }, { block: true, terminate: true });
-		}
-		for (const name of ["read", "grep", "find", "ls", "godot_inspect_project", "godot_inspect_scene", "godot_get_errors", "godot_finish"]) assert.equal(guard({ toolName: name }, ctx), undefined);
-		await handlers.get("input")?.({ source: "user", text: "Continue reviewing this game" }, ctx);
-		assert.ok(guard({ toolName: "bash" }, ctx)?.block, "a follow-up message must not silently bypass review");
-		const select = tools.get("godot_set_project") as TestTool;
-		await assert.rejects(() => select.execute("reset-review", { requirements: [{ id: "R2", text: "New objective" }] }, undefined, undefined, ctx), /new_task/);
-		assert.equal(entries.at(-1)?.phase, "review");
-		await assert.rejects(() => tool.execute("verify-review", {}, undefined, undefined, ctx), /Review the original requirements/);
-		assert.equal(entries.at(-1)?.attempts, savedAttempts);
-		const finish = tools.get("godot_finish") as TestTool;
-		const missing = await finish.execute("review-missing", { checks: [{ id: "R1", status: "missing", evidence: "A requested interaction is absent" }] }, undefined, undefined, ctx);
-		assert.match(missing.content[0].text, /Review found missing/);
+		assert.deepEqual(Object.keys(JSON.parse(requests[0].input)), ["original_requirement", "project_overview", "latest_failure", "current_code", "code_unavailable"]);
+		await fs.writeFile(path.join(root, "Main.tscn"), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+		const second = await settle();
+		assert.equal(second.continue, true);
+		assert.match(second.entries.at(-1)?.content ?? "", /Godot PASS/);
+		assert.match(second.entries.at(-1)?.content ?? "", /missing original requirements/);
 		assert.equal(entries.at(-1)?.phase, "generate");
-		assert.equal(guard({ toolName: "edit" }, ctx), undefined, "a missing original requirement reopens edits");
-		const noChange = await tool.execute("verify-before-fix", {}, undefined, undefined, ctx);
-		assert.match(noChange.content[0].text, /No project files changed/);
-		assert.equal(entries.at(-1)?.attempts, savedAttempts);
-		await fs.writeFile(path.join(root, "asset-notes.txt"), "new asset content");
-		const afterMissing = await tool.execute("verify-missing-fix", {}, undefined, undefined, ctx);
-		assert.match(afterMissing.content[0].text, /Godot PASS/);
-		assert.equal(entries.at(-1)?.phase, "review");
-		await fs.writeFile(path.join(root, "asset-notes.txt"), "revised asset content");
-		await assert.rejects(() => finish.execute("finish-stale", { checks: [{ id: "R1", status: "implemented", evidence: "Scene built" }] }, undefined, undefined, ctx), /Verify the current project files/);
-		assert.ok(guard({ toolName: "bash" }, ctx)?.block, "an out-of-band file change must not reopen shell access");
-		await fs.writeFile(path.join(root, "asset-notes.txt"), "new asset content");
-		const done = await finish.execute("finish", { checks: [{ id: "R1", status: "implemented", evidence: "Boot report and route checked" }] }, undefined, undefined, ctx);
-		assert.match(done.content[0].text, /Task recorded as done/);
+		assert.equal(reviewCalls, 1);
+		assert.ok(requests.some((item) => JSON.parse(item.input).latest_requirement_failure), "Planner receives the review failure rather than a fabricated Godot error");
+		await fs.writeFile(path.join(root, "Game.gd"), 'extends Node\nfunc scan():\n\tpass\n');
+		const third = await settle();
+		assert.equal(third.continue, false);
+		assert.match(third.entries.at(-1)?.content ?? "", /Task recorded as done/);
 		assert.equal(entries.at(-1)?.phase, "done");
-		assert.equal(guard({ toolName: "bash" }, ctx), undefined, "a new user message restores ordinary Pi tools after completion");
-		await handlers.get("agent_end")?.({}, ctx);
-		await assert.rejects(() => tool.execute("verify-after-done", {}, undefined, undefined, ctx), /task has ended/);
+		assert.equal(reviewCalls, 2);
+		assert.equal(await settle(), undefined, "done must not start another Generator turn");
+	} finally {
+		if (!root.startsWith(os.tmpdir() + path.sep)) throw new Error("Refusing to remove a non-temporary project directory.");
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
+
+test("Executor review reads referenced task files and ignores optional polish", async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-executor-input-"));
+	try {
+		const task = path.join(root, "tasks", "signal");
+		const project = path.join(root, "game");
+		await fs.mkdir(task, { recursive: true });
+		await fs.mkdir(project);
+		await fs.writeFile(path.join(task, "instruction.md"), "Build the radio scanning interaction.");
+		await fs.writeFile(path.join(task, "task.toml"), 'name = "Signal"\n');
+		await fs.writeFile(path.join(project, "project.godot"), 'config_version=5\n\n[application]\nrun/main_scene="res://Main.tscn"\n');
+		await fs.writeFile(path.join(project, "Main.tscn"), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+		const index = await inspectProject(project);
+		const state = recordVerification(newTask("Read tasks\\signal and build the game"), { status: "pass", stage: "runtime", errors: [], score: 10, fingerprint: index.fingerprint });
+		const input = JSON.parse(await reviewInput(state, index, root));
+		assert.deepEqual(input.specification_files.map((item: { file: string }) => item.file), ["tasks/signal/instruction.md", "tasks/signal/task.toml"]);
+		assert.ok(input.project_text.some((item: { file: string }) => item.file === "Main.tscn"));
+		assert.match(REVIEW_SYSTEM_PROMPT, /optional polish/);
+		assert.deepEqual(parseReviewOutput('{"checks":[{"id":"R1","status":"implemented","evidence":"Main.tscn"}]}'), [{ id: "R1", status: "implemented", evidence: "Main.tscn" }]);
+		assert.throws(() => parseReviewOutput("not json"));
+	} finally {
+		if (!root.startsWith(os.tmpdir() + path.sep)) throw new Error("Refusing to remove a non-temporary project directory.");
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
+
+test("Executor stops an unchanged requirement repair before repeating review", async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-unchanged-review-"));
+	try {
+		await fs.writeFile(path.join(root, "project.godot"), 'config_version=5\n\n[application]\nrun/main_scene="res://Main.tscn"\n');
+		await fs.writeFile(path.join(root, "Main.tscn"), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+		const project = await inspectProject(root);
+		const reviewed = recordVerification(newTask("Build a signal game"), { status: "pass", stage: "runtime", errors: [], score: 10, fingerprint: project.fingerprint });
+		const missing = finishTask(reviewed, [{ id: "R1", status: "missing", evidence: "Signal interaction absent" }], project.fingerprint);
+		const saved = { ...acceptPlan(missing, { decision: "revise", reason: "Required interaction absent", objective: "Add scan", subtasks: [{ id: "S1", problem: "No scan", goal: "Implement scan" }] }), projectPath: root };
+		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+		const entries: TaskState[] = [];
+		godotPat({
+			on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(name, handler); },
+			registerTool() {}, registerCommand() {}, appendEntry(_name: string, data: unknown) { entries.push(data as TaskState); },
+		} as unknown as ExtensionAPI);
+		const ctx = { cwd: root, sessionManager: { getBranch: () => [{ type: "custom", customType: "godot-pat-state", data: saved }] } };
+		await handlers.get("session_start")?.({}, ctx);
+		const result = await handlers.get("agent_before_settle")?.({ outcome: "completed", entries: [] }, ctx) as { entries: { content: string }[]; continue: boolean };
+		assert.equal(result.continue, false);
+		assert.match(result.entries.at(-1)?.content ?? "", /project has not changed/);
+		assert.equal(entries.at(-1)?.phase, "stopped");
 	} finally {
 		if (!root.startsWith(os.tmpdir() + path.sep)) throw new Error("Refusing to remove a non-temporary project directory.");
 		await fs.rm(root, { recursive: true, force: true });
