@@ -4,10 +4,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { acceptPlan, completeSubtask, finishTask, newTask, recordVerification, restoreTaskState, shouldContinueAfterVerification, type Verification } from "../godot-pat/controller.ts";
-import { efficiencyMode, isFullGameTask, withEfficiencyInstruction } from "../godot-pat/efficiency.ts";
+import { acceptPlan, completeSubtask, newTask, recordVerification, restoreTaskState, shouldContinueAfterVerification, type Verification } from "../godot-pat/controller.ts";
 import { parseGodotErrors, verifyProject } from "../godot-pat/godot.ts";
 import godotPat from "../godot-pat/index.ts";
 import { inspectProject, inspectScene, resolveProjectDirectory } from "../godot-pat/project.ts";
@@ -69,71 +67,31 @@ test("direct failure gets one repair, then a planner; unchanged failure stops", 
 	const verifiedStep = recordVerification(executing, { ...failure, status: "pass", score: 10, fingerprint: "c" });
 	assert.equal(verifiedStep.phase, "execute_plan");
 	const reviewed = completeSubtask(verifiedStep, "Scene transition observed", "c");
-	assert.equal(reviewed.phase, "verified");
-	assert.equal(finishTask(reviewed, "Scene transition and input behavior checked", "c").phase, "done");
+	assert.equal(reviewed.phase, "done");
 	assert.throws(() => completeSubtask(verifiedStep, "", "c"));
 	assert.equal(recordVerification(plan, { ...failure, fingerprint: "b" }).phase, "stopped");
 	const recovered = recordVerification(repair, { ...failure, status: "pass", score: 10 });
-	assert.equal(recovered.phase, "verified");
-	assert.equal(recordVerification(recovered, failure).phase, "repair");
+	assert.equal(recovered.phase, "done");
+	assert.equal(recordVerification(recovered, failure).phase, "stopped");
 });
 
-test("finish requires current verification, completed subtasks, and requirement evidence", () => {
+test("passing verification completes direct tasks and stops automatic continuation", () => {
 	const pass: Verification = { status: "pass", stage: "boot", errors: [], score: 10, fingerprint: "current", evidence: "report.json" };
-	const verified = recordVerification(newTask("Fix a scene"), pass);
-	assert.equal(verified.schemaVersion, 2);
-	assert.throws(() => finishTask(newTask("Fix a scene"), "Checked scene", "current"));
-	assert.throws(() => finishTask(verified, "Checked scene", "changed"));
-	assert.throws(() => finishTask(verified, " ", "current"));
-	const done = finishTask(verified, " Scene behavior checked ", "current");
+	const done = recordVerification(newTask("Fix a scene"), pass);
 	assert.equal(done.phase, "done");
-	assert.equal(done.completionEvidence, "Scene behavior checked");
-	assert.throws(() => finishTask({ ...verified, plan: [{ id: "S1", goal: "Check scene", targets: [], depends_on: [] }] }, "Checked scene", "current"));
 	assert.equal(shouldContinueAfterVerification(done, pass), false);
-	assert.equal(shouldContinueAfterVerification({ ...verified, phase: "stopped" }, pass), false);
-	assert.equal(shouldContinueAfterVerification(verified, { ...pass, status: "fail" }), true);
-	assert.equal(shouldContinueAfterVerification({ ...verified, phase: "execute_plan" }, pass), true);
+	assert.equal(shouldContinueAfterVerification({ ...done, phase: "stopped" }, pass), false);
+	assert.equal(shouldContinueAfterVerification({ ...done, phase: "execute_plan" }, pass), true);
 });
 
-test("only versionless legacy completion is migrated to verified", () => {
+test("states from the retired verified phase resume as done", () => {
 	const pass: Verification = { status: "pass", stage: "boot", errors: [], score: 10, fingerprint: "current", evidence: "report.json" };
-	const done = finishTask(recordVerification(newTask("Fix a scene"), pass), "Checked scene", "current");
+	const done = recordVerification(newTask("Fix a scene"), pass);
 	assert.equal(restoreTaskState(done)?.phase, "done");
-	const { schemaVersion: _version, completionEvidence: _evidence, ...legacy } = done;
-	assert.equal(restoreTaskState(legacy)?.phase, "verified");
+	const { schemaVersion: _version, ...legacy } = done;
+	assert.equal(restoreTaskState(legacy)?.phase, "done");
+	assert.equal(restoreTaskState({ ...done, phase: "verified" })?.phase, "done");
 	assert.equal(restoreTaskState({ ...legacy, schemaVersion: 1 }), undefined);
-});
-
-test("efficiency policy switches without growing or retaining transcript sections", () => {
-	assert.equal(isFullGameTask("制作一个完整游戏"), true);
-	assert.equal(isFullGameTask("做一个游戏"), true);
-	assert.equal(efficiencyMode("direct", true, true), "none");
-	assert.equal(efficiencyMode("direct", false, true), "concise");
-	assert.equal(efficiencyMode("repair", false, true), "diagnose");
-	assert.equal(efficiencyMode("plan", false, true), "none");
-	assert.equal(efficiencyMode("verified", false, true), "concise");
-	assert.equal(efficiencyMode("done", false, true), "none");
-	assert.equal(efficiencyMode("stopped", false, true), "none");
-	assert.equal(efficiencyMode("repair", false, false), "none");
-
-	let messages: AgentMessage[] = [
-		{ role: "system", content: "Base instructions", sections: { workflow: "Keep checks" }, timestamp: 0 },
-		{ role: "user", content: "Build a game", timestamp: 1 },
-	];
-	const history = messages[1];
-	for (const [mode, expected] of [["concise", "concise"], ["diagnose", "diagnose"], ["none", null], ["concise", "concise"]] as const) {
-		messages = withEfficiencyInstruction(messages, mode) ?? messages;
-		assert.equal(messages.length, 2);
-		assert.equal(messages[1], history);
-		const leading = messages[0];
-		assert.equal(leading.role, "system");
-		if (leading.role !== "system") continue;
-		assert.equal(leading.sections?.workflow, "Keep checks");
-		assert.equal(Object.keys(leading.sections ?? {}).filter((key) => key === "ltgd_efficiency").length, 1);
-		assert.equal(expected === null ? leading.sections?.ltgd_efficiency : leading.sections?.ltgd_efficiency?.includes(`efficiency: ${expected}`), expected === null ? null : true);
-		if (expected === "diagnose") assert.ok(!leading.sections?.ltgd_efficiency?.includes("Prefer direct tool actions"));
-		if (expected === "concise") assert.ok(!leading.sections?.ltgd_efficiency?.includes("Diagnose the latest"));
-	}
 });
 
 test("scene inspection and Godot verification use a disposable project", async () => {
