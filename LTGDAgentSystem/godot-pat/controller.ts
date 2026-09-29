@@ -29,6 +29,12 @@ export interface Requirement {
 	id: string;
 	text: string;
 	doneWhen?: string;
+	sourceEvidence?: { sourceId: string; quote: string }[];
+}
+
+export interface RequirementSource {
+	id: string;
+	text: string;
 }
 
 export interface RequirementCheck {
@@ -84,9 +90,11 @@ export interface DecompositionPlan {
 }
 
 export interface TaskState {
-	schemaVersion: 5;
+	schemaVersion: 6;
 	goal: string;
 	requirements: Requirement[];
+	requirementSources?: RequirementSource[];
+	requirementContractHash: string;
 	workItems: WorkItem[];
 	extraWorkIds?: string[];
 	lastFailureWorkIds?: string[];
@@ -109,27 +117,51 @@ export interface TaskState {
 	plannerError?: string;
 }
 
-export function newTask(goal: string, requirements?: Requirement[]): TaskState {
-	const selected = requirements?.length ? requirements : [{ id: "R1", text: goal }];
+export function newTask(goal: string, requirements?: Requirement[], sources?: RequirementSource[]): TaskState {
+	const selected = (requirements?.length ? requirements : [{ id: "R1", text: goal }]).map((item) => item.sourceEvidence
+		? { ...item, sourceEvidence: item.sourceEvidence.map((evidence) => ({ ...evidence })) } : { ...item });
 	const seen = new Set<string>();
+	const sourceById = new Map(sources?.map((source) => [source.id, source.text]));
 	for (const item of selected) {
 		if (!item || typeof item !== "object") throw new Error("Each requirement must be an object.");
 		nonempty(item.id, "Requirement ID");
 		nonempty(item.text, `Requirement ${item.id}`);
 		if (item.doneWhen !== undefined) nonempty(item.doneWhen, `Completion condition for ${item.id}`);
+		if (sources) {
+			nonempty(item.doneWhen, `Completion condition for ${item.id}`);
+			if (!item.sourceEvidence?.length) throw new Error(`Requirement ${item.id} needs source evidence.`);
+			for (const evidence of item.sourceEvidence) {
+				if (!sourceById.get(evidence.sourceId)?.includes(evidence.quote)) throw new Error(`Requirement ${item.id} has invalid source evidence.`);
+			}
+		}
 		if (seen.has(item.id)) throw new Error("Requirement IDs must be unique.");
 		seen.add(item.id);
 	}
+	const requirementSources = sources?.map((source) => ({ ...source }));
+	const requirementContractHash = contractHash(goal, selected, requirementSources);
 	return {
-		schemaVersion: 5, goal, requirements: selected, phase: "generate", attempts: 0, plan: [], solved: [],
+		schemaVersion: 6, goal, requirements: selected, requirementSources, requirementContractHash,
+		phase: "generate", attempts: 0, plan: [], solved: [],
 		workItems: selected.map((item) => ({ id: item.id, goal: item.text, source: "user_requirement", sourceId: item.id,
-			doneWhen: item.doneWhen ?? item.text, status: "active", originEvidence: goal })),
+			doneWhen: item.doneWhen ?? item.text, status: "active", originEvidence: item.sourceEvidence?.map((evidence) => `${evidence.sourceId}: ${evidence.quote}`).join("; ") ?? goal })),
 	};
+}
+
+function contractHash(goal: string, requirements: Requirement[], sources?: RequirementSource[]): string {
+	return createHash("sha256").update(JSON.stringify({ goal, requirements, sources: sources ?? [] })).digest("hex");
 }
 
 export function migrateTaskState(loaded: Omit<Partial<TaskState>, "schemaVersion" | "phase"> & { goal: string; phase?: string; schemaVersion?: number }): TaskState {
 	const requirements = loaded.requirements?.length ? loaded.requirements : [{ id: "R1", text: loaded.goal }];
-	const base = newTask(loaded.goal, requirements);
+	let base: TaskState;
+	try { base = newTask(loaded.goal, requirements, loaded.requirementSources); }
+	catch (error) {
+		const fallback = newTask(loaded.goal);
+		return { ...fallback, projectPath: loaded.projectPath, lastVerification: loaded.lastVerification, phase: "stopped",
+			plannerError: `The saved requirement contract is invalid and needs manual review: ${error instanceof Error ? error.message : String(error)}` };
+	}
+	const contractError = loaded.schemaVersion && loaded.schemaVersion >= 6 && loaded.requirementContractHash !== base.requirementContractHash
+		? "The locked requirement contract changed or lost its integrity hash; manual review is required." : undefined;
 	const legacyDone = loaded.phase === "done" && (!Array.isArray(loaded.completionEvidence) || !loaded.completionEvidence.length);
 	const phase = legacyDone ? "review" : ["direct", "repair", "execute_plan"].includes(loaded.phase ?? "") ? "generate" : loaded.phase ?? "generate";
 	const plan = (loaded.plan ?? []).map((task) => ({ ...task, problem: task.problem ?? "Continue the previously planned subtask.",
@@ -151,11 +183,13 @@ export function migrateTaskState(loaded: Omit<Partial<TaskState>, "schemaVersion
 		if (parent) workItems = [...workItems, ...plan.map((task) => ({ id: task.id, goal: task.goal,
 			source: parent.source, sourceId: parent.sourceId, parentWorkItemId: parent.id, doneWhen: task.goal,
 			status: "active" as const, originEvidence: parent.originEvidence }))];
-		else return { ...base, ...loaded, schemaVersion: 5, phase: "stopped", requirements, plan, workItems,
+		else return { ...base, ...loaded, schemaVersion: 6, requirementContractHash: base.requirementContractHash,
+			phase: "stopped", requirements, plan, workItems,
 			plannerError: "An older plan has no traceable work source and needs review before continuing.", solved: loaded.solved ?? [] };
 	}
-	return { ...base, ...loaded, schemaVersion: 5, requirements, phase: phase as Phase, plan, workItems,
-		lastFailureWorkIds, solved: loaded.solved ?? [] };
+	return { ...base, ...loaded, schemaVersion: 6, requirementContractHash: base.requirementContractHash,
+		requirements, phase: contractError ? "stopped" : phase as Phase, plan, workItems,
+		lastFailureWorkIds, solved: loaded.solved ?? [], plannerError: contractError ?? loaded.plannerError };
 }
 
 export function recordVerification(state: TaskState, result: Verification): TaskState {
@@ -351,20 +385,16 @@ export function finishTask(state: TaskState, checks: RequirementCheck[], fingerp
 		seen.add(check.id);
 	}
 	if (gapDecisions) {
-		const uncertain = checks.filter((check) => check.status === "missing" && gapDecisions[check.id] === "uncertain");
-		if (uncertain.length) return { ...state, phase: "stopped", completionEvidence: checks,
-			plannerError: `The reported gap for ${uncertain.map((item) => item.id).join(", ")} could not be confirmed; manual review is required.` };
+		for (const check of checks.filter((item) => item.status === "missing")) {
+			nonempty(check.expected, `Expected behavior for ${check.id}`);
+			nonempty(check.observed, `Observed behavior for ${check.id}`);
+			if (!gapDecisions[check.id]) throw new Error(`Missing scope decision for ${check.id}.`);
+		}
+		const notAuthorized = checks.filter((check) => check.status === "missing" && gapDecisions[check.id] !== "required");
+		if (notAuthorized.length) return { ...state, phase: "stopped", completionEvidence: checks,
+			plannerError: `Scope review did not authorize the proposed fix for ${notAuthorized.map((item) => item.id).join(", ")}; the original requirement remains reported missing and needs manual review.` };
 	}
-	const reviewed = checks.map((check) => {
-		if (check.status !== "missing" || !gapDecisions) return check;
-		nonempty(check.expected, `Expected behavior for ${check.id}`);
-		nonempty(check.observed, `Observed behavior for ${check.id}`);
-		const decision = gapDecisions[check.id];
-		if (!decision) throw new Error(`Missing scope decision for ${check.id}.`);
-		if (decision === "optional") return { ...check, status: "implemented" as const,
-			evidence: `${check.evidence} Scope review found the proposed change optional.` };
-		return check;
-	});
+	const reviewed = checks;
 	const missing = reviewed.filter((check) => check.status === "missing").map((check) => check.id);
 	const workItems = state.workItems.map((item) => item.source === "user_requirement"
 		? { ...item, status: missing.includes(item.id) ? "active" as const : "closed" as const,

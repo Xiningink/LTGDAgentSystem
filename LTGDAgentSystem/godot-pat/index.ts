@@ -2,7 +2,8 @@ import { Type, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { acceptPlan, activeWorkset, authorizeProposal, finishTask, generatorHandoff, migrateTaskState, newTask, recordCompletedWorkset, recordVerification, validatePlanScope, validateWorksetChecks, type ActiveWorkset, type DecompositionPlan, type Requirement, type ScopeDecision, type TaskState, type Verification, type WorkProposal, type WorksetCheck } from "./controller.ts";
+import { acceptPlan, activeWorkset, authorizeProposal, finishTask, generatorHandoff, migrateTaskState, newTask, recordCompletedWorkset, recordVerification, validatePlanScope, validateWorksetChecks, type ActiveWorkset, type DecompositionPlan, type Requirement, type RequirementSource, type ScopeDecision, type TaskState, type Verification, type WorkProposal, type WorksetCheck } from "./controller.ts";
+import { completeContract, CONTRACT_AUDIT_PROMPT, CONTRACT_EXTRACTION_PROMPT, parseContractItems } from "./contract.ts";
 import { verifyProject } from "./godot.ts";
 import { parsePlannerOutput, plannerInput, PLANNER_SYSTEM_PROMPT } from "./planner.ts";
 import { inspectProject, inspectScene } from "./project.ts";
@@ -11,6 +12,41 @@ import { parsePlanScopeDecisions, parseScopeDecision, PLAN_SCOPE_SYSTEM_PROMPT, 
 const workspace = path.resolve(import.meta.dirname, "../..");
 const godot = path.join(workspace, "Godot_Engine", "Godot_v4.6.2-stable_win64_console.exe");
 const REVIEW_READ_TOOLS = new Set(["read", "grep", "find", "ls", "godot_inspect_project", "godot_inspect_scene", "godot_get_errors"]);
+
+async function requirementSources(request: string, cwd: string, selected: string, filePaths: string[] = []): Promise<RequirementSource[]> {
+	if (!request.trim()) throw new Error("A user task specification is required before selecting a Godot project.");
+	const sources: RequirementSource[] = [{ id: "user_request", text: request }];
+	const explicit = filePaths.map((file) => path.resolve(cwd, file));
+	const mentioned = [...request.matchAll(/(?:^|[\s`"'(])([^\s`"'<>|?*()]+\.(?:md|txt))(?=$|[\s`"',.;!?)])/gi)];
+	const automatic = [path.join(cwd, "instruction.md"), path.join(selected, "instruction.md")];
+	const seen = new Set<string>();
+	const referenced: string[] = [];
+	for (const match of mentioned) {
+		const name = match[1];
+		const candidates = path.isAbsolute(name) ? [name] : [path.resolve(cwd, name), path.resolve(selected, name)];
+		let found: string | undefined;
+		for (const candidate of candidates) {
+			try { if ((await fs.stat(candidate)).isFile()) { found = candidate; break; } }
+			catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+		}
+		if (!found) throw new Error(`Referenced task specification file was not found: ${name}`);
+		referenced.push(found);
+	}
+	for (const file of [...explicit, ...referenced, ...automatic]) {
+		const key = file.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		let stat;
+		try { stat = await fs.stat(file); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT" && automatic.includes(file) && !explicit.includes(file) && !referenced.includes(file)) continue;
+			throw new Error(`Cannot read task specification file ${file}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (!stat.isFile() || stat.size > 512_000) throw new Error(`Task specification must be a readable text file under 512 KB: ${file}`);
+		sources.push({ id: `file:${file}`, text: await fs.readFile(file, "utf8") });
+	}
+	return sources;
+}
 
 async function hasProjectFile(root: string): Promise<boolean> {
 	if (!root) return false;
@@ -76,12 +112,12 @@ export default function godotPat(pi: ExtensionAPI): void {
 	}
 
 	async function modelText(ctx: ExtensionContext, systemPrompt: string, input: string, signal?: AbortSignal): Promise<string> {
-		if (!ctx.model) throw new Error("No model is selected for scope review.");
+		if (!ctx.model) throw new Error("No model is selected for Controller review.");
 		const request: UserMessage = { role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() };
 		const response = await ctx.modelRegistry.streamSimple(ctx.model,
 			{ systemPrompt, messages: [request] },
 			{ signal, reasoning: ctx.thinkingLevel === "off" ? undefined : ctx.thinkingLevel }).result();
-		if (response.stopReason !== "stop") throw new Error(`Scope review ended with ${response.stopReason}.`);
+		if (response.stopReason !== "stop") throw new Error(`Controller review ended with ${response.stopReason}.`);
 		return response.content.filter((part): part is { type: "text"; text: string } => part.type === "text").map((part) => part.text).join("\n");
 	}
 
@@ -90,6 +126,27 @@ export default function godotPat(pi: ExtensionAPI): void {
 		const requirement = state.requirements.find((item) => item.id === proposal.sourceId);
 		try { return parseScopeDecision(await modelText(ctx, SCOPE_SYSTEM_PROMPT, scopeInput(state.goal, requirement, proposal), signal)); }
 		catch (error) { return { decision: "uncertain", reason: `Scope could not be confirmed: ${error instanceof Error ? error.message : String(error)}` }; }
+	}
+
+	async function establishContract(ctx: ExtensionContext, request: string, selected: string,
+		filePaths: string[] | undefined, candidates: Requirement[] | undefined, signal?: AbortSignal): Promise<TaskState> {
+		const sources = await requirementSources(request, ctx.cwd, selected, filePaths);
+		async function reviewedItems(systemPrompt: string, input: string, key: "requirements" | "missing"): Promise<Requirement[]> {
+			let correction = "";
+			for (let attempt = 0; attempt < 2; attempt++) {
+				try { return parseContractItems(await modelText(ctx, systemPrompt, input + correction, signal), key, sources); }
+				catch (error) {
+					if (attempt === 1) throw error;
+					correction = `\n\nYour previous response was rejected: ${error instanceof Error ? error.message : String(error)} Return corrected JSON with exact source quotes.`;
+				}
+			}
+			throw new Error("Requirement contract review did not return a valid result.");
+		}
+		const input = JSON.stringify({ sources, candidate_requirements: candidates ?? [] });
+		const extracted = await reviewedItems(CONTRACT_EXTRACTION_PROMPT, input, "requirements");
+		const auditInput = JSON.stringify({ sources, draft_requirements: extracted });
+		const missing = await reviewedItems(CONTRACT_AUDIT_PROMPT, auditInput, "missing");
+		return newTask(request, completeContract(extracted, missing), sources);
 	}
 
 	async function reviewPlanScope(ctx: ExtensionContext, parentState: TaskState, plan: DecompositionPlan, signal?: AbortSignal): Promise<void> {
@@ -191,7 +248,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event) => {
 		if (event.prompt.trim() && (!state?.projectPath || state.phase === "done" || state.phase === "stopped")) latestUserRequest = event.prompt.trim();
 		if (!state?.projectPath || state.phase === "done" || state.phase === "stopped") {
-			return { systemPrompt: event.systemPrompt + "\n\nIf the user requests Godot game development with LTGD, call godot_set_project to activate the workflow. For other tasks, leave LTGD tools unused." };
+			return { systemPrompt: event.systemPrompt + "\n\nIf the user requests Godot game development with LTGD, call godot_set_project to activate the workflow. Include every task specification file in specification_files; the Controller independently extracts and locks the full requirement contract before generation. For other tasks, leave LTGD tools unused." };
 		}
 		return { systemPrompt: event.systemPrompt + `\n\nWhen working on the selected LTGD Godot game, follow this workflow; for unrelated requests, use Pi normally:
 - You are the Generator. Keep Pi's current directory. The selected project is ${state.projectPath}.
@@ -218,14 +275,15 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "godot_set_project", label: "Select Godot project",
-		description: "Activate a Godot game task and select its output directory. Omit project to use game/ under Pi's current directory. Supply concise requirements from the user's request; if omitted, the full goal becomes one requirement. Set new_task only after a new user request to start another game; an active task's requirements cannot be replaced.",
+		description: "Select the game output directory and establish a locked requirement contract from the user task and specification files. Omit project to use game/ under Pi's current directory. List all task specification files; instruction.md in the current or selected directory is read automatically. Candidate requirements are hints only. Set new_task only after a new user request.",
 		parameters: Type.Object({
 			project: Type.Optional(Type.String({ description: "User-specified project or output directory; relative paths start from Pi's current directory" })),
 			new_task: Type.Optional(Type.Boolean({ description: "Start a new Godot game task even if another project is active" })),
-			requirements: Type.Optional(Type.Array(Type.Object({ id: Type.String(), text: Type.String(), doneWhen: Type.Optional(Type.String()) }), { description: "Stable IDs, original criteria, and optional concrete completion conditions taken only from the user's request" })),
+			specification_files: Type.Optional(Type.Array(Type.String(), { description: "Paths to every referenced task specification file, relative to Pi's current directory unless absolute" })),
+			requirements: Type.Optional(Type.Array(Type.Object({ id: Type.String(), text: Type.String(), doneWhen: Type.Optional(Type.String()) }), { description: "Optional Generator hints; Controller extracts and audits the final contract against full task sources" })),
 		}),
 		executionMode: "sequential",
-		async execute(_id, params, _signal, _update, ctx) {
+		async execute(_id, params, signal, _update, ctx) {
 			if (state?.projectPath) {
 				if (!params.new_task && state.phase === "generate" && state.attempts === 0 && !state.plan.length && !state.pendingRequirements?.length) {
 					return { content: [{ type: "text", text: `Godot project already selected: ${state.projectPath}. Requirements remain fixed for this task.` }], details: { project: state.projectPath } };
@@ -234,12 +292,14 @@ export default function godotPat(pi: ExtensionAPI): void {
 				if (inputRevision <= selectedInputRevision) throw new Error("A new user request is required before starting another Godot game task.");
 			}
 			const selected = path.resolve(ctx.cwd, params.project?.trim() || "game");
+			const task = await establishContract(ctx, latestUserRequest, selected, params.specification_files, params.requirements, signal);
 			await fs.mkdir(selected, { recursive: true });
 			projectRoot = selected;
-			state = { ...newTask(latestUserRequest || "Godot game development task", params.requirements), projectPath: selected };
+			state = { ...task, projectPath: selected };
 			selectedInputRevision = inputRevision;
 			persist();
-			return { content: [{ type: "text", text: `Selected Godot project: ${selected}. Requirements: ${state.requirements.map((item) => `${item.id}: ${item.text}`).join("; ")}. Create and edit project files there; all godot_* tools use this directory.` }], details: { project: selected } };
+			return { content: [{ type: "text", text: `Selected Godot project: ${selected}. Locked requirements:\n${state.requirements.map((item) => `- ${item.id}: ${item.text} | done when: ${item.doneWhen} | source: ${item.sourceEvidence?.map((evidence) => `${evidence.sourceId} [${evidence.quote}]`).join("; ")}`).join("\n")}\nCreate and edit project files there; all godot_* tools use this directory.` }],
+				details: { project: selected, requirementContractHash: state.requirementContractHash } };
 		},
 	});
 
@@ -346,7 +406,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "godot_finish", label: "Complete verified game task",
-		description: "Review only the fixed original requirements after Godot passes. A missing item needs concrete expected/observed evidence and a Controller scope decision; optional or uncertain suggestions cannot reopen work.",
+		description: "Review only the locked original requirements after Godot passes. A missing item needs concrete expected/observed evidence and a Controller scope decision. Optional or uncertain fixes leave the requirement missing and stop automatic work for manual review.",
 		executionMode: "sequential",
 		parameters: Type.Object({ checks: Type.Array(Type.Object({
 			id: Type.String({ description: "Original requirement ID" }),

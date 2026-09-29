@@ -8,7 +8,11 @@ LTGDAgentSystem\start.cmd
 
 `start.cmd` 调用系统中已安装的 `pi` 命令，只额外加载 `godot-pat/index.ts`，并保留启动时的当前目录；正常运行不依赖 `PiAgent/`。扩展在编辑前调用一次 `godot_set_project`：用户指定了输出路径就使用该路径；未指定时在当前目录下创建 `game/`，把 `project.godot` 等工程文件放在其中。相对输出路径以 Pi 的当前目录为基准。模型和会话由已安装的 Pi 管理。
 
-扩展提供 `godot_set_project`、`godot_inspect_project`、`godot_inspect_scene`、`godot_verify`、`godot_get_errors`、`godot_propose_work` 和最终的 `godot_finish`。加载扩展不会限制无关 Pi 任务的普通工具；调用 `godot_set_project` 后才启用游戏任务状态。在同一会话收到新的用户请求、开始另一个游戏时，可用 `new_task` 重新选择；重复选择不会改写当前任务的需求。Pi 的原生工具仍负责编辑。选项目时可同时提交从原始需求提炼的 `requirements: [{id,text,doneWhen?}]`；不提交时以完整原始目标作为单条 `R1`。清单固定在当前任务状态中，模型仍须对照原始需求，防止最初提炼时漏项。
+扩展提供 `godot_set_project`、`godot_inspect_project`、`godot_inspect_scene`、`godot_verify`、`godot_get_errors`、`godot_propose_work` 和最终的 `godot_finish`。加载扩展不会限制无关 Pi 任务的普通工具；调用 `godot_set_project` 后才启用游戏任务状态。在同一会话收到新的用户请求、开始另一个游戏时，可用 `new_task` 重新选择；重复选择不会改写当前任务的需求。Pi 的原生工具仍负责编辑。选项目时可传 `specification_files` 指向任务说明文件，Controller 也会读取用户消息中以普通路径写出的 `.md`/`.txt` 文件，以及 Pi 当前目录和所选项目目录中已有的 `instruction.md`。Generator 传入的 `requirements` 只作抽取提示，不能直接锁定为最终清单。
+
+## Requirement Contract
+
+Controller 在创建游戏目录和进入生成阶段前，读取原始用户请求及任务说明文件，独立抽取需求并再次核对遗漏。每个新需求保留 `id`、`text`、`doneWhen` 和精确匹配原文的 `sourceEvidence`；核对发现的遗漏会加入清单。来源文件不可读取、模型无法确认覆盖或来源摘录无法匹配时，项目选择失败，不开始生成。清单和来源快照的哈希随会话保存；恢复会话时发现清单或来源被替换会停止自动工作。模型核对无法在逻辑上保证零遗漏，但不再直接信任 Generator 提交的清单。旧会话按原有清单迁移，不会被追认为已完成新式来源核对。
 
 ## 工作范围授权
 
@@ -20,7 +24,7 @@ Generator 只完成当前整组工作；没有未完成的授权项时立即提�
 
 Planner 是独立模型请求，不共享 Generator 的长对话。只有 Controller 记录实际 Godot Verification 失败后才会启动 Planner，处理本次全部不同错误、相关代码、项目概要及已完成子任务。每个子任务必须带 `parentWorkItemId`，引用本次失败产生的工作项，不增加可选目标。Planner 返回 `revise`、原因、目标和有序子任务，或返回 `cannot_resolve_in_project` 及证据。扩展校验父项引用，并用独立范围判定拒绝无关子任务；格式或范围错误至多让 Planner 修正一次。Planner 不编辑文件。整份计划仍由 Generator 完成后统一运行 Godot，不逐项运行。
 
-验证通过后进入 `review`。`godot_finish` 接受每个固定需求 ID 的一条 `checks`：`implemented`、`needs_playtest` 或 `missing`，每项附具体证据；`missing` 还须填写 `expected`、`observed`，由 Controller 范围判定。只有确认必需的缺项返回 `generate`；可选建议不重开任务；无法确认的缺项停止自动工作并报告人工复查需要，不记为完成。没有缺项、且工程指纹与最近一次成功验证一致时才记为 `done`。`needs_playtest` 表示实现存在但仍需人工试玩。`review` 中工程未变化时再次调用 `godot_verify` 会复用成功结果；工程变化后必须用 `reopen_requirement_id` 指明原始需求，并提交其 `workset_checks`。Godot“通过”仅指导入与启动，不能证明玩法。状态使用 `schemaVersion: 5`；旧会话保守迁移工作来源，无法确定来源的旧计划停止自动执行，不会被误判完成。
+验证通过后进入 `review`。`godot_finish` 接受每个固定需求 ID 的一条 `checks`：`implemented`、`needs_playtest` 或 `missing`，每项附具体证据；`missing` 还须填写 `expected`、`observed`，由 Controller 范围判定。只有确认必需的缺项返回 `generate`；`optional` 只表示提议的修改未获授权，不能推断原需求已实现，因此与 `uncertain` 一样保留 `missing` 并停止自动工作，等待人工复查。没有缺项、且工程指纹与最近一次成功验证一致时才记为 `done`。`needs_playtest` 表示实现存在但仍需人工试玩。`review` 中工程未变化时再次调用 `godot_verify` 会复用成功结果；工程变化后必须用 `reopen_requirement_id` 指明原始需求，并提交其 `workset_checks`。Godot“通过”仅指导入与启动，不能证明玩法。状态使用 `schemaVersion: 6`；旧会话保守迁移工作来源，无法确定来源的旧计划停止自动执行，不会被误判完成。
 
 验证直接在选定的游戏目录运行 Godot 导入与无头启动；Godot 可能在该目录生成 `.godot` 导入缓存。Verification 结果返回给 Pi 并保存在任务状态中，不创建 `runs/` 报告或日志。`godot_verify` 的简短结果只显示部分错误并标明总数；`godot_get_errors` 可读取本次保存的全部错误，Planner 也接收全部不同错误。Godot 正常退出时若仅报告 `ERROR: N resources still in use at exit`，它作为非阻断的退出清理诊断显示，不触发 Planner；其他脚本或导入错误仍会失败，进程非零退出也仍视为失败。若 Godot 非零退出却没有识别出的错误，结果会附带末尾输出用于诊断。工程指纹覆盖选定项目中除缓存和工具目录外的全部普通文件，包括图片、音频等素材。验证前后指纹若不同，本次验证结果作废。`PASS` 只代表导入与启动成功，**不代表玩法、视觉或需求全部通过**；`godot_finish` 的需求检查证据由模型提交，无法代替真人试玩。外部玩法 validator 尚未接入，也不会因 Planner 判断“无需修改”而被自动改判通过。
 

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { parseContractItems } from "../godot-pat/contract.ts";
 import { acceptPlan, activeWorkset, authorizeProposal, finishTask, generatorHandoff, migrateTaskState, newTask, recordCompletedWorkset, recordVerification, validatePlanScope, validateWorksetChecks, type DecompositionPlan, type TaskState, type Verification } from "../godot-pat/controller.ts";
 import { classifyGodotDiagnostics, parseGodotErrors, verifyProject } from "../godot-pat/godot.ts";
 import godotPat from "../godot-pat/index.ts";
@@ -32,14 +33,15 @@ test("scope suggestions cannot create work or reopen a completed requirement", (
 	assert.equal(parseScopeDecision('{"decision":"optional","reason":"Already works"}').decision, "optional");
 });
 
-test("review gaps need a scope decision and preserve uncertain manual review", () => {
+test("review gaps remain missing when the proposed fix is optional or uncertain", () => {
 	const reviewed = recordVerification(newTask("Build a menu", [{ id: "R1", text: "Start button works" }]),
 		{ status: "pass", stage: "runtime", errors: [], score: 10, fingerprint: "current" });
 	const check = { id: "R1", status: "missing" as const, expected: "Start button works", observed: "Button does nothing", evidence: "No start handler" };
 	assert.throws(() => finishTask(reviewed, [check], "current", {}), /Missing scope decision/);
 	const optional = finishTask(reviewed, [check], "current", { R1: "optional" });
-	assert.equal(optional.phase, "done");
-	assert.equal((optional.completionEvidence?.[0] as { status: string })?.status, "implemented");
+	assert.equal(optional.phase, "stopped");
+	assert.equal((optional.completionEvidence?.[0] as { status: string })?.status, "missing");
+	assert.match(optional.plannerError ?? "", /remains reported missing/);
 	const uncertain = finishTask(reviewed, [check], "current", { R1: "uncertain" });
 	assert.equal(uncertain.phase, "stopped");
 	assert.equal((uncertain.completionEvidence?.[0] as { status: string })?.status, "missing");
@@ -66,7 +68,7 @@ test("Planner children must cite authorized parents and optional children are re
 
 test("older session plans without a traceable parent do not become completed work", () => {
 	const migrated = migrateTaskState({ goal: "Build a menu", schemaVersion: 4, phase: "generate", plan: [{ id: "S1", problem: "Old task", goal: "Unknown origin" }] });
-	assert.equal(migrated.schemaVersion, 5);
+	assert.equal(migrated.schemaVersion, 6);
 	assert.equal(migrated.phase, "stopped");
 	assert.match(migrated.plannerError ?? "", /no traceable work source/);
 });
@@ -106,6 +108,51 @@ test("Generator proposals need a scope verdict before joining the workset", asyn
 	await propose.execute("required", { ...base, observed: "Button does nothing", proposedGoal: "Connect start button" }, undefined, undefined, ctx);
 	assert.deepEqual(entries.at(-1)?.extraWorkIds, ["W1"]);
 	assert.equal(activeWorkset(entries.at(-1)!).items.at(-1)?.goal, "Connect start button");
+});
+
+test("Controller audits instruction.md before locking the requirement contract", async () => {
+	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-contract-"));
+	try {
+		await fs.writeFile(path.join(cwd, "instruction.md"), "Radio scanning\nJamming\nAudio cues\n");
+		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+		const tools = new Map<string, unknown>();
+		const entries: TaskState[] = [];
+		godotPat({ on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(name, handler); },
+			registerTool(tool: { name: string }) { tools.set(tool.name, tool); }, registerCommand() {},
+			appendEntry(_name: string, data: unknown) { entries.push(data as TaskState); } } as unknown as ExtensionAPI);
+		const ctx = { cwd, model: { provider: "test", id: "mock" }, thinkingLevel: "off",
+			modelRegistry: { streamSimple(_model: unknown, request: { systemPrompt: string; messages: { content: { text: string }[] }[] }) {
+				const sources = JSON.parse(request.messages[0].content[0].text).sources as { id: string; text: string }[];
+				const sourceId = sources.find((source) => source.id.startsWith("file:"))?.id;
+				assert.ok(sourceId, "Controller must read instruction.md itself");
+				const item = (text: string) => ({ text, doneWhen: `${text} works`, sourceEvidence: [{ sourceId, quote: text }] });
+				const result = request.systemPrompt.includes("Audit an LTGD")
+					? { missing: [item("Jamming"), item("Audio cues")], uncertain: false }
+					: { requirements: [item("Radio scanning")] };
+				return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: JSON.stringify(result) }] }) };
+			} }, sessionManager: { getBranch: () => [] } };
+		await handlers.get("session_start")?.({}, ctx);
+		await handlers.get("input")?.({ source: "user", text: "Build the game in instruction.md" }, ctx);
+		type TestTool = { execute: (id: string, params: object, signal: undefined, update: undefined, context: object) => Promise<unknown> };
+		await (tools.get("godot_set_project") as TestTool).execute("select", { requirements: [{ id: "R1", text: "Radio scanning" }] }, undefined, undefined, ctx);
+		const locked = entries.at(-1)!;
+		assert.deepEqual(locked.requirements.map((item) => item.text), ["Radio scanning", "Jamming", "Audio cues"]);
+		assert.equal(locked.requirements[2].sourceEvidence?.[0].quote, "Audio cues");
+		assert.equal(locked.requirementSources?.length, 2);
+		assert.equal(locked.schemaVersion, 6);
+		const tampered = migrateTaskState({ ...locked, requirements: locked.requirements.slice(0, 1) });
+		assert.equal(tampered.phase, "stopped", "a locked requirement must not disappear during restore");
+		assert.match(tampered.plannerError ?? "", /contract changed/);
+		assert.equal(migrateTaskState({ ...locked, goal: "Different game" }).phase, "stopped");
+		const invalidEvidence = migrateTaskState({ ...locked, requirements: locked.requirements.map((item, index) => index
+			? item : { ...item, sourceEvidence: [{ sourceId: "user_request", quote: "not in the request" }] }) });
+		assert.equal(invalidEvidence.phase, "stopped");
+		assert.throws(() => parseContractItems(JSON.stringify({ requirements: [{ text: "Invented feature", doneWhen: "It works",
+			sourceEvidence: [{ sourceId: "user_request", quote: "not in the request" }] }] }), "requirements", locked.requirementSources!), /match a supplied source/);
+	} finally {
+		if (!cwd.startsWith(os.tmpdir() + path.sep)) throw new Error("Refusing to remove a non-temporary project directory.");
+		await fs.rm(cwd, { recursive: true, force: true });
+	}
 });
 
 test("Planner cannot turn an import error into optional redesign work", async () => {
@@ -154,7 +201,16 @@ test("project selection creates game/ only for an unspecified output path", asyn
 			registerCommand() {},
 			appendEntry(_name: string, data: unknown) { entries.push(data); },
 		} as unknown as ExtensionAPI);
-		const ctx = { cwd, sessionManager: { getBranch: () => [] } };
+		const ctx = { cwd, model: { provider: "test", id: "mock" }, thinkingLevel: "off",
+			modelRegistry: { streamSimple(_model: unknown, request: { systemPrompt: string; messages: { content: { text: string }[] }[] }) {
+				const sources = JSON.parse(request.messages[0].content[0].text).sources as { id: string; text: string }[];
+				const prompt = sources[0].text;
+				const requirements = prompt.includes("Start menu")
+					? ["Start menu", "Signal collection"].map((text) => ({ text, doneWhen: `${text} works`, sourceEvidence: [{ sourceId: "user_request", quote: text }] }))
+					: [{ text: prompt, doneWhen: "Game starts", sourceEvidence: [{ sourceId: "user_request", quote: prompt }] }];
+				const result = request.systemPrompt.includes("Audit an LTGD") ? { missing: [], uncertain: false } : { requirements };
+				return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: JSON.stringify(result) }] }) };
+			} }, sessionManager: { getBranch: () => [] } };
 		await handlers.get("session_start")?.({}, ctx);
 		assert.equal(handlers.has("tool_call"), true, "LTGD installs a phase-aware tool gate");
 		assert.equal(await handlers.get("tool_call")?.({ toolName: "bash", input: { command: "pwd" } }, ctx), undefined, "unrelated Pi tools remain available before a game is selected");
@@ -162,7 +218,7 @@ test("project selection creates game/ only for an unspecified output path", asyn
 		const unrelated = await handlers.get("before_agent_start")?.({ prompt: "List my notes", systemPrompt: "BASE" }, ctx) as { systemPrompt: string };
 		assert.match(unrelated.systemPrompt, /For other tasks, leave LTGD tools unused/);
 		assert.equal(entries.length, 0, "an unrelated request must not start a Godot task");
-		await handlers.get("input")?.({ source: "user", text: "Build in output/AS/HorrorSignalLost" }, ctx);
+		await handlers.get("input")?.({ source: "user", text: "Build in output/AS/HorrorSignalLost with Start menu and Signal collection" }, ctx);
 		type TestTool = { execute: (id: string, params: object, signal: undefined, update: undefined, context: object) => Promise<{ content: { text: string }[] }> };
 		const select = tools.get("godot_set_project") as TestTool;
 		const inspect = tools.get("godot_inspect_project") as TestTool;
@@ -183,7 +239,7 @@ test("project selection creates game/ only for an unspecified output path", asyn
 		await handlers.get("input")?.({ source: "user", text: "Start a new game without an output path" }, ctx);
 		await select.execute("select", { new_task: true }, undefined, undefined, ctx);
 		assert.equal((entries.at(-1) as { projectPath: string }).projectPath, path.join(cwd, "game"));
-		assert.deepEqual((entries.at(-1) as TaskState).requirements, [{ id: "R1", text: "Start a new game without an output path" }]);
+		assert.deepEqual((entries.at(-1) as TaskState).requirements.map((item) => item.text), ["Start a new game without an output path"]);
 		assert.equal(await fs.stat(path.join(cwd, "game")).then((item) => item.isDirectory()), true);
 		assert.equal(ctx.cwd, cwd);
 	} finally {
