@@ -10,9 +10,9 @@
 
 流程是 `Generator → Executor（Godot → 需求审查）→ done`；任一检查失败则 `Executor → Planner → Generator → Executor`。Executor 和 Planner 不继承 Generator 的整段对话。项目文件是共享事实来源；修复计划作为简短交接返回 Pi，Generator 的 Pi 会话仍然保留自身历史。自动交接解决了 Generator 结束本轮却忘记验证的问题；它不能强制中断尚未结束的 Generator 轮次，生成阶段的及时收手仍取决于明确提示词。
 
-`godot_set_project` 选择工程目录并启动任务。`requirements: [{id,text}]` 仅用于用户明确给出验收项的情况；通常省略，保留完整原始目标作为 `R1`，由 Executor 读取用户提到的任务文件。`godot_inspect_project`、`godot_inspect_scene` 和 `godot_get_errors` 提供简短项目索引、场景结构和最近一次完整 Godot 错误。`godot_verify` 与 `godot_finish` 不再由 Generator 调用。`/godot-status` 可查看阶段和验证结果。
+`godot_set_project` 选择工程目录并启动任务，不接受 Generator 自行拆出的需求清单。Executor 把原始请求及其中提到的任务文件作为一个整体审查。`godot_inspect_project` 和 `godot_inspect_scene` 提供简短项目索引与场景结构。`/godot-status` 可查看阶段和验证结果；验证由 Executor 自动执行，不暴露给 Generator。
 
-Godot 验证结果只保存在 Pi 会话任务状态中，不生成 `runs/` 报告。验证指纹以 Godot 导入和运行后的工程文件为准，并排除 `.godot` 等缓存目录。相同工程指纹与相同错误重复出现，或修改后连续出现同一错误时，系统停止自动重试。状态使用 `schemaVersion: 7`；旧会话的需求、计划和验证记录会在恢复时转换。Godot PASS 仅代表导入与启动通过，需求是否满足由随后独立审查决定。
+Godot 验证结果只保存在 Pi 会话任务状态中，不生成 `runs/` 报告。验证指纹以 Godot 导入和运行后的工程文件为准，并排除 `.godot` 等缓存目录。如果 Planner 要求修复后工程文件仍未变化，系统停止重复检查。Godot PASS 仅代表导入与启动通过，需求是否满足由随后独立审查决定。
 
 ## 按帧截图（Windows）
 

@@ -1,11 +1,11 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { DecompositionPlan, Failure, TaskState } from "./controller.ts";
+import type { Failure, RepairPlan, TaskState } from "./controller.ts";
 import type { ProjectIndex } from "./project.ts";
 
 export const PLANNER_SYSTEM_PROMPT = `You are the Planner for a Godot game development task. The Executor found either a Godot runtime/import failure or a concrete missing original requirement. Analyze only that latest failure and the supplied project evidence. You cannot run tools or edit files. Every subtask must address the observed failure; distinguish a supported diagnosis from a hypothesis. Preserve the original requirement and do not invent optional improvements.
 
-Return one JSON object. If project files need revision, return {"decision":"revise","reason":"...","objective":"...","subtasks":[{"id":"S1","problem":"...","goal":"...","suggested_files":["res://...godot"]}]}. Subtasks must be ordered and nonempty; suggested_files is optional and only a hint. If the evidence does not support a project-code change, return {"decision":"cannot_resolve_in_project","reason":"...","evidence":["..."]} and no subtasks. Distinguish observed evidence from hypotheses. Do not prescribe exact patches or add checks or dependencies. Return JSON only.`;
+Return one JSON object. If project files need revision, return {"decision":"revise","reason":"...","subtasks":[{"problem":"...","goal":"...","suggested_files":["res://...godot"]}]}. Subtasks must be ordered and nonempty; suggested_files is optional and only a hint. If the evidence does not support a project-code change, return {"decision":"cannot_resolve_in_project","reason":"...","evidence":["..."]} and no subtasks. Distinguish observed evidence from hypotheses. Do not prescribe exact patches or add checks or dependencies. Return JSON only.`;
 
 interface CodeExcerpt {
 	file: string;
@@ -81,12 +81,11 @@ async function currentCode(root: string, errors: Failure[]): Promise<{ excerpts:
 
 export async function plannerInput(state: TaskState, project: ProjectIndex): Promise<string> {
 	const failure = state.lastVerification;
-	if (failure?.status === "pass" && state.pendingRequirements?.length) {
+	if (failure?.status === "pass" && state.reviewFailure) {
 		return JSON.stringify({
 			original_requirement: state.goal,
 			project_overview: { main_scene: project.mainScene ?? null, scenes: project.scenes, scripts: project.scripts, total_files: project.resources },
-			missing_requirements: state.requirements.filter((item) => state.pendingRequirements?.includes(item.id)),
-			latest_requirement_failure: state.completionEvidence?.filter((check) => typeof check === "object" && check.status === "missing"),
+			latest_requirement_failure: state.reviewFailure,
 		});
 	}
 	if (failure?.status !== "fail") throw new Error("Planner requires a failed Executor check.");
@@ -98,13 +97,13 @@ export async function plannerInput(state: TaskState, project: ProjectIndex): Pro
 			total_files: project.resources,
 			error_files: [...new Set(failure.errors.map((error) => error.file).filter((file): file is string => !!file))],
 		},
-		latest_failure: { stage: failure.stage, errors: failure.errors, unchanged_attempts: state.unchangedFailureStreak ?? 0 },
+		latest_failure: { stage: failure.stage, errors: failure.errors },
 		current_code: excerpts,
 		code_unavailable: unavailable,
 	});
 }
 
-export function parsePlannerOutput(raw: string): DecompositionPlan {
+export function parsePlannerOutput(raw: string): RepairPlan {
 	const trimmed = raw.trim();
 	const fenced = trimmed.match(/^```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```$/i);
 	const source = fenced ? fenced[1].trim() : trimmed;
@@ -113,5 +112,5 @@ export function parsePlannerOutput(raw: string): DecompositionPlan {
 	try { parsed = JSON.parse(source); }
 	catch { throw new Error("Planner must return one valid JSON object."); }
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("Planner must return one JSON object.");
-	return parsed as DecompositionPlan;
+	return parsed as RepairPlan;
 }
