@@ -103,15 +103,13 @@ export default function godotPat(pi: ExtensionAPI): void {
 		if (unauthorized.length) throw new Error(`Planner added unsupported work: ${unauthorized.join(", ")}. Remove it and keep only required subtasks.`);
 	}
 
-	async function runPlanner(ctx: ExtensionContext, signal?: AbortSignal, authorizedWorkId?: string): Promise<string> {
-		if (!state || !projectRoot || (state.phase !== "plan" && !authorizedWorkId)) throw new Error("An authorized work item is required before planning.");
+	async function runPlanner(ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
+		if (!state || !projectRoot || state.phase !== "plan" || state.lastVerification?.status !== "fail" || !state.lastFailureWorkIds?.length) {
+			throw new Error("Planner requires an actual failed Godot verification recorded by the Controller.");
+		}
 		if (!ctx.model) throw new Error("No model is selected for the Planner.");
-		const authorizedWork = authorizedWorkId ? state.workItems.find((item) => item.id === authorizedWorkId && item.status === "active") : undefined;
-		if (authorizedWorkId && !authorizedWork) throw new Error("Unknown or completed work item cannot be decomposed.");
-		const parentState = authorizedWork ? { ...state, phase: "plan" as const, lastFailureWorkIds: [authorizedWork.id],
-			carryWorkIds: activeWorkset(state).items.map((item) => item.id).filter((id) => id !== authorizedWork.id) } : state;
 		const overview = await inspectProject(projectRoot);
-		const input = await plannerInput(parentState, overview, authorizedWork);
+		const input = await plannerInput(state, overview);
 		let correction = "";
 		for (let attempt = 0; attempt < 2; attempt++) {
 			const request: UserMessage = { role: "user", content: [{ type: "text", text: input + correction }], timestamp: Date.now() };
@@ -124,8 +122,8 @@ export default function godotPat(pi: ExtensionAPI): void {
 			try {
 				const raw = response.content.filter((part): part is { type: "text"; text: string } => part.type === "text").map((part) => part.text).join("\n");
 				const plan = parsePlannerOutput(raw);
-				await reviewPlanScope(ctx, parentState, plan, signal);
-				state = acceptPlan(parentState, plan);
+				await reviewPlanScope(ctx, state, plan, signal);
+				state = acceptPlan(state, plan);
 				persist();
 				return state.phase === "stopped" ? nextInstruction(state) : generatorHandoff(state);
 			} catch (error) {
@@ -198,7 +196,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 		return { systemPrompt: event.systemPrompt + `\n\nWhen working on the selected LTGD Godot game, follow this workflow; for unrelated requests, use Pi normally:
 - You are the Generator. Keep Pi's current directory. The selected project is ${state.projectPath}.
 - Use godot_inspect_project and godot_inspect_scene for concise context. Read raw files only for edits. Keep all project files inside the selected directory.
-- After completing the current workset, call godot_verify with a completed/unresolved evidence report for every active ID. On failure the extension automatically calls an isolated, short-context Planner. Implement its whole plan before verifying again; do not call a separate planning tool.
+- After completing the current workset, call godot_verify with a completed/unresolved evidence report for every active ID. Only an actual Godot verification failure lets the Controller call the isolated Planner. You cannot request planning yourself. Implement the whole resulting plan before verifying again.
 - Only Controller-authorized work is a task. A possible improvement is a suggestion, not permission to inspect or edit further. If genuinely necessary new work is discovered, call godot_propose_work with the original requirement or observed Godot error and concrete evidence; optional or uncertain proposals do not authorize work.
 - When no authorized workset item remains unmet, submit the whole workset to godot_verify immediately. Do not start an open-ended polish or inspection pass.
 - If a session resumes with a pending plan, call godot_verify to resume planning without another Godot run.
@@ -263,19 +261,6 @@ export default function godotPat(pi: ExtensionAPI): void {
 				? `Controller authorized the evidence-backed work. ${nextInstruction(state)}`
 				: `Controller classified this as ${verdict.decision}; it is a suggestion only and does not authorize more work. ${verdict.reason} Continue the existing workset or verify it.` }],
 				details: verdict };
-		},
-	});
-
-	pi.registerTool({
-		name: "godot_decompose_work", label: "Decompose authorized work",
-		description: "Ask the isolated Planner to decompose one active Controller-authorized work item. Planner children must retain its source and cannot add optional goals.",
-		parameters: Type.Object({ work_item_id: Type.String() }), executionMode: "sequential",
-		async execute(_id, params, signal, _update, ctx) {
-			if (!state || state.phase !== "generate") throw new Error("Only active generation work may be decomposed.");
-			const item = state.workItems.find((entry) => entry.id === params.work_item_id && entry.status === "active");
-			if (!item) throw new Error("The requested work item is not active.");
-			const handoff = await runPlanner(ctx, signal, item.id);
-			return { content: [{ type: "text", text: handoff || nextInstruction(state!) }], details: { workItemId: item.id } };
 		},
 	});
 

@@ -60,10 +60,8 @@ test("Planner children must cite authorized parents and optional children are re
 	const decisions = parsePlanScopeDecisions('{"decisions":[{"id":"S1","decision":"optional","reason":"Decorative change"}]}', ["S1"]);
 	assert.equal(decisions.S1, "optional");
 	assert.throws(() => parsePlanScopeDecisions('{"decisions":[]}', ["S1"]), /every subtask/);
-	const initial = newTask("Build two features", [{ id: "R1", text: "Menu" }, { id: "R2", text: "Movement" }]);
-	const decomposed = acceptPlan({ ...initial, phase: "plan", lastFailureWorkIds: ["R1"], carryWorkIds: ["R2"] },
-		{ decision: "revise", reason: "Menu needs parts", objective: "Build menu", subtasks: [{ id: "S1", parentWorkItemId: "R1", problem: "No menu", goal: "Create menu" }] });
-	assert.deepEqual(activeWorkset(decomposed).items.map((item) => item.id), ["S1", "R2"], "decomposing one item must keep the rest of the workset");
+	const decomposed = acceptPlan(failure, plan);
+	assert.deepEqual(activeWorkset(decomposed).items.map((item) => item.id), ["S1"]);
 });
 
 test("older session plans without a traceable parent do not become completed work", () => {
@@ -71,6 +69,13 @@ test("older session plans without a traceable parent do not become completed wor
 	assert.equal(migrated.schemaVersion, 5);
 	assert.equal(migrated.phase, "stopped");
 	assert.match(migrated.plannerError ?? "", /no traceable work source/);
+});
+
+test("Planner input requires an actual failed verification", async () => {
+	const project = { project: os.tmpdir(), mainScene: undefined, scenes: [], scripts: [], resources: 0, fingerprint: "x" };
+	await assert.rejects(() => plannerInput(newTask("Build a menu"), project), /recorded failed Godot verification/);
+	const passed = recordVerification(newTask("Build a menu"), { status: "pass", stage: "runtime", errors: [], score: 10, fingerprint: "x" });
+	await assert.rejects(() => plannerInput(passed, project), /recorded failed Godot verification/);
 });
 
 test("Generator proposals need a scope verdict before joining the workset", async () => {
@@ -91,6 +96,7 @@ test("Generator proposals need a scope verdict before joining the workset", asyn
 		} },
 		sessionManager: { getBranch: () => [{ type: "custom", customType: "godot-pat-state", data: saved }] } };
 	await handlers.get("session_start")?.({}, ctx);
+	assert.equal(tools.has("godot_decompose_work"), false, "Generator must not have a Planner entry point");
 	type TestTool = { execute: (id: string, params: object, signal?: undefined, update?: undefined, context?: object) => Promise<{ content: { text: string }[] }> };
 	const propose = tools.get("godot_propose_work") as TestTool;
 	const base = { basis: "user_requirement", sourceId: "R1", expected: "Start button works", observed: "Button works", evidence: "Click opens game" };

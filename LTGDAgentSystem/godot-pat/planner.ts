@@ -1,9 +1,9 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { DecompositionPlan, Failure, TaskState, WorkItem } from "./controller.ts";
+import type { DecompositionPlan, Failure, TaskState } from "./controller.ts";
 import type { ProjectIndex } from "./project.ts";
 
-export const PLANNER_SYSTEM_PROMPT = `You are the Planner for a Godot game development task. You may only decompose the authorized work items supplied in the request. They may come from an original user requirement, a confirmed requirement gap, or the latest Godot verification failure. You cannot run tools or edit files. Every subtask must name its parentWorkItemId and directly contribute to that parent's doneWhen condition. Distinguish observed evidence from hypotheses. Do not invent optional improvements.
+export const PLANNER_SYSTEM_PROMPT = `You are the Planner for a Godot game development task. The Controller calls you only after an actual Godot verification failure. Decompose only the failure work items supplied in this request. You cannot run tools or edit files. Every subtask must name its parentWorkItemId and directly contribute to removing that parent's observed error. Distinguish observed evidence from hypotheses. Do not invent optional improvements.
 
 Return one JSON object. If project files need revision, return {"decision":"revise","reason":"...","objective":"...","subtasks":[{"id":"S1","parentWorkItemId":"authorized ID","problem":"...","goal":"...","suggested_files":["res://...godot"]}]}. Subtasks must be ordered and nonempty; suggested_files is optional and only a hint. If the evidence does not support a project-code change, return {"decision":"cannot_resolve_in_project","reason":"...","evidence":["..."]} and no subtasks. Do not prescribe optional checks or dependencies. Return JSON only.`;
 
@@ -79,20 +79,20 @@ async function currentCode(root: string, errors: Failure[]): Promise<{ excerpts:
 	return { excerpts, unavailable };
 }
 
-export async function plannerInput(state: TaskState, project: ProjectIndex, authorizedWork?: WorkItem): Promise<string> {
+export async function plannerInput(state: TaskState, project: ProjectIndex): Promise<string> {
 	const failure = state.lastVerification;
-	if (!authorizedWork && failure?.status !== "fail") throw new Error("Planner requires a failed verification or authorized work item.");
-	const errors = authorizedWork ? [] : failure!.errors;
+	if (failure?.status !== "fail" || !state.lastFailureWorkIds?.length) throw new Error("Planner requires a recorded failed Godot verification.");
+	const errors = failure.errors;
 	const { excerpts, unavailable } = await currentCode(project.project, errors);
 	return JSON.stringify({
 		original_requirement: state.goal,
-		...(authorizedWork ? { authorized_work: [authorizedWork] } : { authorized_work: (state.lastFailureWorkIds ?? []).map((id) => state.workItems.find((item) => item.id === id)) }),
+		authorized_work: state.lastFailureWorkIds.map((id) => state.workItems.find((item) => item.id === id)),
 		project_overview: {
 			main_scene: project.mainScene ?? null,
 			total_files: project.resources,
 			error_files: [...new Set(errors.map((error) => error.file).filter((file): file is string => !!file))],
 		},
-		latest_failure: authorizedWork ? null : { stage: failure!.stage, errors, unchanged_attempts: state.unchangedFailureStreak ?? 0 },
+		latest_failure: { stage: failure.stage, errors, unchanged_attempts: state.unchangedFailureStreak ?? 0 },
 		current_code: excerpts,
 		code_unavailable: unavailable,
 		completed_subtasks: state.solved.map(({ id, evidence }) => ({ id, evidence })),

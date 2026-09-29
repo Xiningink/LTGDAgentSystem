@@ -89,7 +89,6 @@ export interface TaskState {
 	requirements: Requirement[];
 	workItems: WorkItem[];
 	extraWorkIds?: string[];
-	carryWorkIds?: string[];
 	lastFailureWorkIds?: string[];
 	suggestions?: { proposal: WorkProposal; decision: Exclude<ScopeDecision, "required">; reason: string }[];
 	pendingRequirements?: string[];
@@ -183,7 +182,6 @@ export function recordVerification(state: TaskState, result: Verification): Task
 		lastFingerprint: result.fingerprint,
 		lastVerification: result,
 		lastFailureWorkIds: failureItems.map((item) => item.id),
-		carryWorkIds: undefined,
 		workItems: [...state.workItems, ...failureItems],
 		plannerError: phase === "stopped" ? "The same Godot errors persisted after repeated revisions." : undefined,
 	};
@@ -195,7 +193,7 @@ function nonempty(text: unknown, label: string): asserts text is string {
 
 export function activeWorkset(state: TaskState): ActiveWorkset {
 	if (state.phase !== "generate") throw new Error("An active workset is available only during generation.");
-	const extras = [...(state.extraWorkIds ?? []), ...(state.carryWorkIds ?? [])].map((id) => {
+	const extras = (state.extraWorkIds ?? []).map((id) => {
 		const item = state.workItems.find((candidate) => candidate.id === id);
 		if (!item) throw new Error(`Unknown approved work item: ${id}.`);
 		return { id, goal: item.goal };
@@ -243,7 +241,9 @@ export function validateWorksetChecks(state: TaskState, checks: WorksetCheck[] |
 }
 
 export function acceptPlan(state: TaskState, plan: DecompositionPlan): TaskState {
-	if (state.phase !== "plan") throw new Error("Planner is available only in the plan phase.");
+	if (state.phase !== "plan" || state.lastVerification?.status !== "fail" || !state.lastFailureWorkIds?.length) {
+		throw new Error("Planner requires an actual failed Godot verification recorded by the Controller.");
+	}
 	if (!plan || typeof plan !== "object" || Array.isArray(plan)) throw new Error("Supply a structured plan.");
 	if (plan.decision !== "revise" && plan.decision !== "cannot_resolve_in_project") throw new Error("Planner decision must be revise or cannot_resolve_in_project.");
 	nonempty(plan.reason, "Plan reason");
@@ -281,6 +281,9 @@ export function acceptPlan(state: TaskState, plan: DecompositionPlan): TaskState
 }
 
 export function validatePlanScope(state: TaskState, plan: DecompositionPlan): void {
+	if (state.phase !== "plan" || state.lastVerification?.status !== "fail") {
+		throw new Error("Planner scope review requires an actual failed Godot verification.");
+	}
 	if (plan.decision !== "revise") return;
 	const allowed = new Set(state.lastFailureWorkIds ?? []);
 	if (!allowed.size) throw new Error("Planner has no authorized work item to decompose.");
@@ -375,7 +378,7 @@ export function finishTask(state: TaskState, checks: RequirementCheck[], fingerp
 				status: "active", originEvidence: `${check.observed ?? check.evidence} Evidence: ${check.evidence}` };
 		});
 		return { ...state, phase: "generate", plan: [], planObjective: undefined, solved: [], pendingRequirements: missing,
-			completionEvidence: reviewed, workItems: [...workItems, ...gaps], extraWorkIds: [], carryWorkIds: [] };
+			completionEvidence: reviewed, workItems: [...workItems, ...gaps], extraWorkIds: [] };
 	}
 	return { ...state, phase: "done", pendingRequirements: [], completionEvidence: reviewed,
 		workItems: workItems.map((item) => item.status === "reported_complete" ? { ...item, status: "closed" } : item) };
