@@ -42,12 +42,6 @@ export interface ActiveWorkset {
 	items: { id: string; goal: string }[];
 }
 
-export interface WorksetCheck {
-	id: string;
-	status: "completed" | "unresolved";
-	evidence: string;
-}
-
 export interface DecompositionPlan {
 	decision: "revise" | "cannot_resolve_in_project";
 	reason: string;
@@ -57,7 +51,7 @@ export interface DecompositionPlan {
 }
 
 export interface TaskState {
-	schemaVersion: 4;
+	schemaVersion: 5;
 	goal: string;
 	requirements: Requirement[];
 	pendingRequirements?: string[];
@@ -70,10 +64,6 @@ export interface TaskState {
 	lastVerification?: Verification;
 	plan: Subtask[];
 	planObjective?: string;
-	/** Retained only when restoring a version 2 session. */
-	integrationChecks?: string[];
-	/** Generator-reported completed work; older records may contain verified subtask evidence. */
-	solved: { id: string; evidence: string; fingerprint: string }[];
 	completionEvidence?: RequirementCheck[] | string[];
 	plannerError?: string;
 }
@@ -88,7 +78,7 @@ export function newTask(goal: string, requirements?: Requirement[]): TaskState {
 		if (seen.has(item.id)) throw new Error("Requirement IDs must be unique.");
 		seen.add(item.id);
 	}
-	return { schemaVersion: 4, goal, requirements: selected, phase: "generate", attempts: 0, plan: [], solved: [] };
+	return { schemaVersion: 5, goal, requirements: selected, phase: "generate", attempts: 0, plan: [] };
 }
 
 export function recordVerification(state: TaskState, result: Verification): TaskState {
@@ -133,31 +123,6 @@ export function activeWorkset(state: TaskState): ActiveWorkset {
 	return { source: "user", items: state.requirements.map(({ id, text }) => ({ id, goal: text })) };
 }
 
-export function validateWorksetChecks(state: TaskState, checks: WorksetCheck[] | undefined, reopenRequirementId?: string): { workset: ActiveWorkset; unresolved: WorksetCheck[] } {
-	let workset: ActiveWorkset;
-	if (reopenRequirementId !== undefined) {
-		if (state.phase !== "review") throw new Error("Reopen a requirement only after a successful verification.");
-		const requirement = state.requirements.find((item) => item.id === reopenRequirementId);
-		if (!requirement) throw new Error(`Unknown original requirement: ${reopenRequirementId}.`);
-		workset = { source: "review", items: [{ id: requirement.id, goal: requirement.text }] };
-	} else {
-		workset = activeWorkset(state);
-	}
-	if (!Array.isArray(checks)) throw new Error(`Report every ${workset.source} workset item in workset_checks before verification.`);
-	const expected = new Set(workset.items.map((item) => item.id));
-	const seen = new Set<string>();
-	for (const check of checks) {
-		if (!check || typeof check !== "object") throw new Error("Each workset check must be an object.");
-		if (!expected.has(check.id)) throw new Error(`Unknown active workset ID: ${check.id}.`);
-		if (seen.has(check.id)) throw new Error(`Duplicate workset ID: ${check.id}.`);
-		if (check.status !== "completed" && check.status !== "unresolved") throw new Error(`Invalid workset status for ${check.id}.`);
-		nonempty(check.evidence, `Evidence for ${check.id}`);
-		seen.add(check.id);
-	}
-	if (seen.size !== expected.size) throw new Error(`Report every ${workset.source} workset item exactly once. Missing: ${workset.items.filter((item) => !seen.has(item.id)).map((item) => item.id).join(", ")}.`);
-	return { workset, unresolved: checks.filter((check) => check.status === "unresolved") };
-}
-
 export function acceptPlan(state: TaskState, plan: DecompositionPlan): TaskState {
 	if (state.phase !== "plan") throw new Error("Planner is available only in the plan phase.");
 	if (!plan || typeof plan !== "object" || Array.isArray(plan)) throw new Error("Supply a structured plan.");
@@ -184,7 +149,7 @@ export function acceptPlan(state: TaskState, plan: DecompositionPlan): TaskState
 		}
 		seen.add(task.id);
 	}
-	return { ...state, phase: "generate", plan: subtasks, planObjective: plan.objective, pendingRequirements: undefined, integrationChecks: undefined, solved: [], completionEvidence: undefined, plannerError: undefined };
+	return { ...state, phase: "generate", plan: subtasks, planObjective: plan.objective, pendingRequirements: undefined, completionEvidence: undefined, plannerError: undefined };
 }
 
 export function generatorHandoff(state: TaskState): string {
@@ -193,14 +158,7 @@ export function generatorHandoff(state: TaskState): string {
 	return `Generator plan: ${JSON.stringify({
 		objective: state.planObjective ?? state.goal,
 		subtasks: state.plan,
-	})}\nCurrent ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal}`).join("; ")}. Complete the whole workset, then call godot_verify once with workset_checks for every ID. If an item is unresolved, continue only that item. Suggested files are hints, not a restriction on edits; do not add optional objectives.`;
-}
-
-export function recordCompletedWorkset(state: TaskState, checks: WorksetCheck[], fingerprint: string): TaskState {
-	const { workset, unresolved } = validateWorksetChecks(state, checks);
-	if (unresolved.length) throw new Error("Cannot record an incomplete workset as completed.");
-	if (workset.source !== "planner") return state;
-	return { ...state, solved: checks.map(({ id, evidence }) => ({ id, evidence, fingerprint })) };
+	})}\nCurrent ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal}`).join("; ")}. Complete the plan, then call godot_verify. Suggested files are hints, not a restriction on edits; do not add optional objectives.`;
 }
 
 export function finishTask(state: TaskState, checks: RequirementCheck[], fingerprint: string): TaskState {
@@ -219,7 +177,7 @@ export function finishTask(state: TaskState, checks: RequirementCheck[], fingerp
 		seen.add(check.id);
 	}
 	const missing = checks.filter((check) => check.status === "missing").map((check) => check.id);
-	if (missing.length) return { ...state, phase: "generate", plan: [], planObjective: undefined, solved: [], pendingRequirements: missing, completionEvidence: checks };
+	if (missing.length) return { ...state, phase: "generate", plan: [], planObjective: undefined, pendingRequirements: missing, completionEvidence: checks };
 	return { ...state, phase: "done", pendingRequirements: [], completionEvidence: checks };
 }
 import { createHash } from "node:crypto";

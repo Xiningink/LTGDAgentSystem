@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { acceptPlan, activeWorkset, finishTask, generatorHandoff, newTask, recordCompletedWorkset, recordVerification, validateWorksetChecks, type DecompositionPlan, type TaskState, type Verification } from "../godot-pat/controller.ts";
+import { acceptPlan, activeWorkset, finishTask, generatorHandoff, newTask, recordVerification, type DecompositionPlan, type TaskState, type Verification } from "../godot-pat/controller.ts";
 import { classifyGodotDiagnostics, parseGodotErrors, verifyProject } from "../godot-pat/godot.ts";
 import godotPat from "../godot-pat/index.ts";
 import { parsePlannerOutput, plannerInput } from "../godot-pat/planner.ts";
@@ -27,7 +27,8 @@ test("project selection creates game/ only for an unspecified output path", asyn
 		} as unknown as ExtensionAPI);
 		const ctx = { cwd, sessionManager: { getBranch: () => [] } };
 		await handlers.get("session_start")?.({}, ctx);
-		assert.equal(handlers.has("tool_call"), false, "loading LTGD must not block ordinary Pi tools");
+		assert.equal(handlers.has("tool_call"), true, "LTGD guards review after a Godot pass");
+		assert.equal(handlers.get("tool_call")?.({ toolName: "bash" }, ctx), undefined, "unrelated Pi tools remain available before a game task starts");
 		assert.equal(handlers.has("agent_end"), false, "unrelated turns must not trigger automatic Godot verification");
 		const unrelated = await handlers.get("before_agent_start")?.({ prompt: "List my notes", systemPrompt: "BASE" }, ctx) as { systemPrompt: string };
 		assert.match(unrelated.systemPrompt, /For other tasks, leave LTGD tools unused/);
@@ -80,12 +81,7 @@ test("first failed verification plans immediately; one full-plan pass enters rev
 	assert.deepEqual(activeWorkset(executing), { source: "planner", items: [{ id: "S1", goal: "Fix scene" }, { id: "S2", goal: "Wire game route" }] });
 	assert.match(generatorHandoff(executing), /"problem":"Scene import fails"/);
 	assert.match(generatorHandoff(executing), /"suggested_files":\["Route.gd"\]/);
-	const completed = [{ id: "S1", status: "completed" as const, evidence: "Scene now imports" }, { id: "S2", status: "completed" as const, evidence: "Route connected" }];
-	const progress = recordCompletedWorkset(executing, completed, "c");
-	assert.equal(progress.solved[0].id, "S1");
-	assert.equal(progress.solved[1].id, "S2");
-	assert.throws(() => recordCompletedWorkset(executing, [{ id: "missing", status: "completed", evidence: "no" }], "c"));
-	const reviewed = recordVerification(progress, { ...failure, status: "pass", score: 10, fingerprint: "c" });
+	const reviewed = recordVerification(executing, { ...failure, status: "pass", score: 10, fingerprint: "c" });
 	assert.equal(reviewed.phase, "review");
 	assert.throws(() => finishTask(reviewed, [], "c"));
 	const checks = [{ id: "R1", status: "implemented" as const, evidence: "Game scene created" }];
@@ -136,23 +132,6 @@ test("review checks fixed requirements and sends only missing work back to gener
 	assert.deepEqual(done.completionEvidence?.[1], { id: "R2", status: "needs_playtest", evidence: "Collection code exists; timing needs manual playtest" });
 });
 
-test("workset reports require every active ID exactly once and keep unresolved work out of verification", () => {
-	const state = newTask("Game", [{ id: "R1", text: "Menu" }, { id: "R2", text: "Movement" }]);
-	const completed = { id: "R1", status: "completed" as const, evidence: "Menu created" };
-	const unresolved = { id: "R2", status: "unresolved" as const, evidence: "Movement script is not connected" };
-	assert.deepEqual(validateWorksetChecks(state, [completed, unresolved]).unresolved, [unresolved]);
-	assert.throws(() => validateWorksetChecks(state, undefined), /workset_checks/);
-	assert.throws(() => validateWorksetChecks(state, [completed]), /Missing: R2/);
-	assert.throws(() => validateWorksetChecks(state, [completed, completed]), /Duplicate/);
-	assert.throws(() => validateWorksetChecks(state, [completed, { ...unresolved, id: "R3" }]), /Unknown/);
-	assert.throws(() => validateWorksetChecks(state, [completed, { ...unresolved, evidence: " " }]), /nonempty/);
-	assert.throws(() => validateWorksetChecks(state, [completed, { ...unresolved, status: "unknown" as "unresolved" }]), /Invalid workset status/);
-	assert.throws(() => recordCompletedWorkset(state, [completed, unresolved], "x"), /incomplete/);
-	const reviewed = recordVerification(state, { status: "pass", stage: "runtime", errors: [], score: 10, fingerprint: "x" });
-	assert.deepEqual(validateWorksetChecks(reviewed, [{ id: "R2", status: "completed", evidence: "Movement connected" }], "R2").workset, { source: "review", items: [{ id: "R2", goal: "Movement" }] });
-	assert.throws(() => validateWorksetChecks(reviewed, [completed], "R3"), /Unknown original requirement/);
-});
-
 test("Planner may stop without code edits and repeated unchanged failures have a bounded path", () => {
 	const failure: Verification = { status: "fail", stage: "import", errors: [{ stage: "import", message: "same error" }], score: 0, fingerprint: "a" };
 	const first = recordVerification(newTask("Game"), failure);
@@ -187,7 +166,7 @@ test("Planner receives every verification error and nearby current code without 
 		assert.equal(input.current_code.length, 1);
 		assert.match(input.current_code[0].code, /func play\(\):/);
 		assert.ok(input.code_unavailable.some((item: { file: string }) => item.file === "../outside.gd"));
-		assert.deepEqual(input.completed_subtasks, []);
+		assert.equal("completed_subtasks" in input, false);
 		assert.equal(parsePlannerOutput('```json\n{"decision":"revise","reason":"r","objective":"x","subtasks":[{"id":"S1","problem":"p","goal":"g"}]}\n```').objective, "x");
 		assert.throws(() => parsePlannerOutput("not json"));
 		assert.equal(recordVerification(newTask("Game"), { status: "infrastructure", stage: "godot", errors: [], score: 0, fingerprint: "x" }).phase, "generate");
@@ -323,7 +302,7 @@ test("a no-code-change Planner decision stops automatic edits without claiming v
 		await handlers.get("session_start")?.({}, ctx);
 		type TestTool = { execute: (id: string, params: object, signal?: undefined, update?: undefined, context?: object) => Promise<{ content: { text: string }[] }> };
 		const verify = tools.get("godot_verify") as TestTool;
-		const result = await verify.execute("verify", { workset_checks: [{ id: "R1", status: "completed", evidence: "Project files created" }] }, undefined, undefined, ctx);
+		const result = await verify.execute("verify", {}, undefined, undefined, ctx);
 		assert.equal(calls, 1);
 		assert.match(result.content[0].text, /Stop automatic retries/);
 		assert.doesNotMatch(result.content[0].text, /Generator plan/);
@@ -345,7 +324,7 @@ test("failed verification calls a short-context Planner and hands its whole plan
 		const entries: TaskState[] = [];
 		let plannerCalls = 0;
 		let plannerRequest = "";
-		const initial = { ...newTask("Build a complete game"), projectPath: root };
+		const initial = { ...newTask("Build a complete game"), projectPath: root, solved: [{ id: "S-old", evidence: "Old self-report", fingerprint: "old" }] };
 		const decomposition: DecompositionPlan = {
 			decision: "revise", reason: "Main scene is missing",
 			objective: "Make the game boot and navigate",
@@ -370,15 +349,11 @@ test("failed verification calls a short-context Planner and hands its whole plan
 		await handlers.get("session_start")?.({}, ctx);
 		type TestTool = { execute: (id: string, params: object, signal?: undefined, update?: undefined, context?: object) => Promise<{ content: { text: string }[] }> };
 		const tool = tools.get("godot_verify") as TestTool;
-		const initialUnresolved = await tool.execute("verify-incomplete", { workset_checks: [{ id: "R1", status: "unresolved", evidence: "Main scene is not ready" }] }, undefined, undefined, ctx);
-		assert.match(initialUnresolved.content[0].text, /Current user workset is incomplete/);
-		assert.match(initialUnresolved.content[0].text, /Godot verification was not run/);
-		assert.equal(plannerCalls, 0);
-		assert.equal(entries.length, 0, "an unresolved report must not mutate task state");
-		const result = await tool.execute("verify-fail", { workset_checks: [{ id: "R1", status: "completed", evidence: "Game files created" }] }, undefined, undefined, ctx);
+		const result = await tool.execute("verify-fail", {}, undefined, undefined, ctx);
 		assert.equal(plannerCalls, 1);
 		assert.equal("usage" in result, false);
-		assert.deepEqual(Object.keys(JSON.parse(plannerRequest)), ["original_requirement", "project_overview", "latest_failure", "current_code", "code_unavailable", "completed_subtasks"]);
+		assert.equal("solved" in (entries.at(-1) ?? {}), false, "old self-reports are discarded when a session resumes");
+		assert.deepEqual(Object.keys(JSON.parse(plannerRequest)), ["original_requirement", "project_overview", "latest_failure", "current_code", "code_unavailable"]);
 		assert.match(result.content[0].text, /"problem":"Main scene is missing"/);
 		assert.equal(entries.at(-1)?.phase, "generate");
 		assert.equal(tools.has("godot_plan"), false);
@@ -387,61 +362,55 @@ test("failed verification calls a short-context Planner and hands its whole plan
 		const phase = await handlers.get("context_with_system")?.({ messages: [system] }, ctx) as { messages: { sections: Record<string, string> }[] };
 		assert.match(phase.messages[0].sections["ltgd-current-state"], /Current planner workset: S1: Create main scene/);
 		assert.doesNotMatch(phase.messages[0].sections["ltgd-current-state"], /"problem"/);
-		await assert.rejects(() => tool.execute("verify-no-report", {}, undefined, undefined, ctx), /workset_checks/);
-		const planUnresolved = await tool.execute("verify-plan-incomplete", { workset_checks: [{ id: "S1", status: "unresolved", evidence: "Main scene syntax still fails" }] }, undefined, undefined, ctx);
-		assert.match(planUnresolved.content[0].text, /Current planner workset is incomplete/);
-		assert.equal(plannerCalls, 1);
-		assert.equal(entries.at(-1)?.attempts, 1);
 		await fs.writeFile(path.join(root, "Main.tscn"), '[gd_scene format=3]\n\n[node name="Main" type="Node"\n');
 		await handlers.get("agent_end")?.({}, ctx);
 		assert.equal(plannerCalls, 1, "plan execution must not auto-verify at agent_end");
-		const secondFailure = await tool.execute("verify-fail-again", { workset_checks: [{ id: "S1", status: "completed", evidence: "Main scene revised" }] }, undefined, undefined, ctx);
+		const secondFailure = await tool.execute("verify-fail-again", {}, undefined, undefined, ctx);
 		assert.match(secondFailure.content[0].text, /Godot FAIL/);
 		assert.equal(plannerCalls, 2);
 		assert.equal(entries.at(-1)?.phase, "generate");
 		await fs.writeFile(path.join(root, "Main.tscn"), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
-		const pass = await tool.execute("verify-pass", { workset_checks: [{ id: "S1", status: "completed", evidence: "Main scene created" }] }, undefined, undefined, ctx);
+		const pass = await tool.execute("verify-pass", {}, undefined, undefined, ctx);
 		assert.match(pass.content[0].text, /Godot PASS/);
 		assert.equal(plannerCalls, 2);
 		assert.equal(entries.at(-1)?.phase, "review");
-		assert.deepEqual(entries.at(-1)?.solved.map((item) => item.id), ["S1"]);
+		assert.equal("solved" in (entries.at(-1) ?? {}), false);
 		const reviewPhase = await handlers.get("context_with_system")?.({ messages: phase.messages }, ctx) as { messages: { sections: Record<string, string> }[] };
 		assert.match(reviewPhase.messages[0].sections["ltgd-current-state"], /Phase: review/);
 		assert.equal(Object.keys(reviewPhase.messages[0].sections).filter((key) => key === "ltgd-current-state").length, 1);
 		const savedAttempts = entries.at(-1)?.attempts;
+		const guard = handlers.get("tool_call") as (event: { toolName: string }, ctx: object) => { block: boolean; terminate: boolean } | undefined;
+		for (const name of ["write", "edit", "bash", "godot_verify"]) {
+			assert.deepEqual({ block: guard({ toolName: name }, ctx)?.block, terminate: guard({ toolName: name }, ctx)?.terminate }, { block: true, terminate: true });
+		}
+		for (const name of ["read", "grep", "find", "ls", "godot_inspect_project", "godot_inspect_scene", "godot_get_errors", "godot_finish"]) assert.equal(guard({ toolName: name }, ctx), undefined);
+		await handlers.get("input")?.({ source: "user", text: "Continue reviewing this game" }, ctx);
+		assert.ok(guard({ toolName: "bash" }, ctx)?.block, "a follow-up message must not silently bypass review");
 		const select = tools.get("godot_set_project") as TestTool;
 		await assert.rejects(() => select.execute("reset-review", { requirements: [{ id: "R2", text: "New objective" }] }, undefined, undefined, ctx), /new_task/);
 		assert.equal(entries.at(-1)?.phase, "review");
-		const cached = await tool.execute("verify-cached", {}, undefined, undefined, ctx);
-		assert.match(cached.content[0].text, /reused the last successful verification/);
+		await assert.rejects(() => tool.execute("verify-review", {}, undefined, undefined, ctx), /Review the original requirements/);
 		assert.equal(entries.at(-1)?.attempts, savedAttempts);
 		const finish = tools.get("godot_finish") as TestTool;
 		const missing = await finish.execute("review-missing", { checks: [{ id: "R1", status: "missing", evidence: "A requested interaction is absent" }] }, undefined, undefined, ctx);
 		assert.match(missing.content[0].text, /Review found missing/);
 		assert.equal(entries.at(-1)?.phase, "generate");
-		const noChange = await tool.execute("verify-before-fix", { workset_checks: [{ id: "R1", status: "completed", evidence: "No changes yet" }] }, undefined, undefined, ctx);
+		assert.equal(guard({ toolName: "edit" }, ctx), undefined, "a missing original requirement reopens edits");
+		const noChange = await tool.execute("verify-before-fix", {}, undefined, undefined, ctx);
 		assert.match(noChange.content[0].text, /No project files changed/);
 		assert.equal(entries.at(-1)?.attempts, savedAttempts);
 		await fs.writeFile(path.join(root, "asset-notes.txt"), "new asset content");
-		const afterMissing = await tool.execute("verify-missing-fix", { workset_checks: [{ id: "R1", status: "completed", evidence: "Missing interaction added" }] }, undefined, undefined, ctx);
+		const afterMissing = await tool.execute("verify-missing-fix", {}, undefined, undefined, ctx);
 		assert.match(afterMissing.content[0].text, /Godot PASS/);
 		assert.equal(entries.at(-1)?.phase, "review");
 		await fs.writeFile(path.join(root, "asset-notes.txt"), "revised asset content");
 		await assert.rejects(() => finish.execute("finish-stale", { checks: [{ id: "R1", status: "implemented", evidence: "Scene built" }] }, undefined, undefined, ctx), /Verify the current project files/);
-		await assert.rejects(() => tool.execute("verify-unjustified", {}, undefined, undefined, ctx), /reopen_requirement_id/);
-		const beforeInvalidReopen = entries.length;
-		await assert.rejects(() => tool.execute("verify-invalid-reopen", { reopen_requirement_id: "R1", workset_checks: [{ id: "R2", status: "completed", evidence: "Wrong ID" }] }, undefined, undefined, ctx), /Unknown active workset ID/);
-		assert.equal(entries.length, beforeInvalidReopen, "invalid reopen reports must not persist a state change");
-		const unresolvedReopen = await tool.execute("verify-unresolved-reopen", { reopen_requirement_id: "R1", workset_checks: [{ id: "R1", status: "unresolved", evidence: "The changed asset still needs integration" }] }, undefined, undefined, ctx);
-		assert.match(unresolvedReopen.content[0].text, /Current review workset is incomplete/);
-		assert.equal(entries.length, beforeInvalidReopen);
-		assert.equal(entries.at(-1)?.phase, "review");
-		const afterAsset = await tool.execute("verify-asset", { reopen_requirement_id: "R1", workset_checks: [{ id: "R1", status: "completed", evidence: "Asset integrated" }] }, undefined, undefined, ctx);
-		assert.match(afterAsset.content[0].text, /Godot PASS/);
-		assert.equal(entries.at(-1)?.phase, "review");
+		assert.ok(guard({ toolName: "bash" }, ctx)?.block, "an out-of-band file change must not reopen shell access");
+		await fs.writeFile(path.join(root, "asset-notes.txt"), "new asset content");
 		const done = await finish.execute("finish", { checks: [{ id: "R1", status: "implemented", evidence: "Boot report and route checked" }] }, undefined, undefined, ctx);
 		assert.match(done.content[0].text, /Task recorded as done/);
 		assert.equal(entries.at(-1)?.phase, "done");
+		assert.equal(guard({ toolName: "bash" }, ctx), undefined, "a new user message restores ordinary Pi tools after completion");
 		await handlers.get("agent_end")?.({}, ctx);
 		await assert.rejects(() => tool.execute("verify-after-done", {}, undefined, undefined, ctx), /task has ended/);
 	} finally {

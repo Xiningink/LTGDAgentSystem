@@ -93,7 +93,6 @@ export async function plannerInput(state: TaskState, project: ProjectIndex): Pro
 		latest_failure: { stage: failure.stage, errors: failure.errors, unchanged_attempts: state.unchangedFailureStreak ?? 0 },
 		current_code: excerpts,
 		code_unavailable: unavailable,
-		completed_subtasks: state.solved.map(({ id, evidence }) => ({ id, evidence })),
 	});
 }
 
