@@ -2,50 +2,13 @@ import { Type, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { acceptPlan, activeWorkset, finishTask, generatorHandoff, migrateTaskState, newTask, recordVerification, validateWorksetChecks, type ActiveWorkset, type Requirement, type RequirementSource, type TaskState, type Verification, type WorksetCheck } from "./controller.ts";
-import { CONTRACT_EXTRACTION_PROMPT, parseContractItems } from "./contract.ts";
+import { acceptPlan, activeWorkset, finishTask, generatorHandoff, newTask, recordCompletedWorkset, recordVerification, validateWorksetChecks, type ActiveWorkset, type TaskState, type Verification, type WorksetCheck } from "./controller.ts";
 import { verifyProject } from "./godot.ts";
 import { parsePlannerOutput, plannerInput, PLANNER_SYSTEM_PROMPT } from "./planner.ts";
 import { inspectProject, inspectScene } from "./project.ts";
 
 const workspace = path.resolve(import.meta.dirname, "../..");
 const godot = path.join(workspace, "Godot_Engine", "Godot_v4.6.2-stable_win64_console.exe");
-const REVIEW_READ_TOOLS = new Set(["read", "grep", "find", "ls", "godot_inspect_project", "godot_inspect_scene", "godot_get_errors"]);
-
-async function requirementSources(request: string, cwd: string, selected: string, filePaths: string[] = []): Promise<RequirementSource[]> {
-	if (!request.trim()) throw new Error("A user task specification is required before selecting a Godot project.");
-	const sources: RequirementSource[] = [{ id: "user_request", text: request }];
-	const explicit = filePaths.map((file) => path.resolve(cwd, file));
-	const mentioned = [...request.matchAll(/(?:^|[\s`"'(])([^\s`"'<>|?*()]+\.(?:md|txt|toml))(?=$|[\s`"',.;!?)])/gi)];
-	const automatic = ["instruction.md", "task.toml"].flatMap((name) => [path.join(cwd, name), path.join(selected, name)]);
-	const seen = new Set<string>();
-	const referenced: string[] = [];
-	for (const match of mentioned) {
-		const name = match[1];
-		const candidates = path.isAbsolute(name) ? [name] : [path.resolve(cwd, name), path.resolve(selected, name)];
-		let found: string | undefined;
-		for (const candidate of candidates) {
-			try { if ((await fs.stat(candidate)).isFile()) { found = candidate; break; } }
-			catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-		}
-		if (!found) throw new Error(`Referenced task specification file was not found: ${name}`);
-		referenced.push(found);
-	}
-	for (const file of [...explicit, ...referenced, ...automatic]) {
-		const key = file.toLowerCase();
-		if (seen.has(key)) continue;
-		seen.add(key);
-		let stat;
-		try { stat = await fs.stat(file); }
-		catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT" && automatic.includes(file) && !explicit.includes(file) && !referenced.includes(file)) continue;
-			throw new Error(`Cannot read task specification file ${file}: ${error instanceof Error ? error.message : String(error)}`);
-		}
-		if (!stat.isFile() || stat.size > 512_000) throw new Error(`Task specification must be a readable text file under 512 KB: ${file}`);
-		sources.push({ id: `file:${file}`, text: await fs.readFile(file, "utf8") });
-	}
-	return sources;
-}
 
 async function hasProjectFile(root: string): Promise<boolean> {
 	if (!root) return false;
@@ -80,9 +43,9 @@ function completeErrors(result: Verification): string {
 function nextInstruction(state: TaskState): string {
 	if (state.phase === "generate") {
 		const workset = activeWorkset(state);
-		return `Current ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal.length > 160 ? `${item.goal.slice(0, 157)}...` : item.goal}`).join("; ")}. Complete only the unmet items. When this whole workset is complete, call godot_verify with one evidence-backed workset_checks entry per ID. Do not continue exploring for optional improvements.`;
+		return `Current ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal.length > 160 ? `${item.goal.slice(0, 157)}...` : item.goal}`).join("; ")}. Complete only these goals, then call godot_verify with one workset_checks entry per ID. If any item is unresolved, continue only unresolved items. Do not add optional improvements.`;
 	}
-	if (state.phase === "review") return `Godot import and boot passed. Review the original requirements (${state.requirements.map((item) => `${item.id}: ${item.text}`).join("; ")}). Call godot_finish once with evidence for each ID. A missing requirement directly returns to generation. Use needs_playtest for behavior that exists but needs a human test. Do not edit the project or seek optional improvements.`;
+	if (state.phase === "review") return `Godot import and boot passed. Review each original requirement (${state.requirements.map((item) => `${item.id}: ${item.text}`).join("; ")}) against the original user request. Call godot_finish with one check per ID. If you changed the project after the pass, finish only the relevant original requirement and call godot_verify with reopen_requirement_id and its workset_checks before finishing. Mark missing work as missing; mark behavior requiring human playtesting as needs_playtest. Do not add optional polish.`;
 	if (state.phase === "done") return "Give the user a concise final report with the verification evidence and remaining playtest limits.";
 	if (state.phase === "stopped") return `Stop automatic retries and report the blocker: ${state.plannerError ?? "repeated identical failure"}.`;
 	return "Planner is running; wait for its structured handoff.";
@@ -104,34 +67,27 @@ export default function godotPat(pi: ExtensionAPI): void {
 		state = undefined;
 		for (const entry of entries) {
 			if (typeof entry === "object" && entry !== null && "type" in entry && entry.type === "custom" && "customType" in entry && entry.customType === "godot-pat-state" && "data" in entry) {
-				const loaded = entry.data as Partial<TaskState> & { goal: string; phase?: string; schemaVersion?: number };
-				state = migrateTaskState(loaded);
+				const loaded = entry.data as TaskState & { phase: string; schemaVersion?: number; plan?: (TaskState["plan"][number] & { targets?: string[] })[] };
+				const legacyDone = loaded.schemaVersion === undefined && loaded.phase === "done" && !loaded.completionEvidence;
+				state = {
+					...loaded,
+					schemaVersion: 4,
+					requirements: loaded.requirements?.length ? loaded.requirements : [{ id: "R1", text: loaded.goal }],
+					phase: legacyDone ? "review" : ["direct", "repair", "execute_plan"].includes(loaded.phase) ? "generate" : loaded.phase as TaskState["phase"],
+					plan: (loaded.plan ?? []).map((task) => ({
+						id: task.id,
+						problem: task.problem ?? "Continue the previously planned subtask.",
+						goal: task.goal,
+						suggested_files: task.suggested_files ?? (task as typeof task & { targets?: string[] }).targets,
+					})),
+					solved: loaded.solved ?? [],
+				};
 			}
 		}
 	}
 
-	async function modelText(ctx: ExtensionContext, systemPrompt: string, input: string, signal?: AbortSignal): Promise<string> {
-		if (!ctx.model) throw new Error("No model is selected for Controller review.");
-		const request: UserMessage = { role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() };
-		const response = await ctx.modelRegistry.streamSimple(ctx.model,
-			{ systemPrompt, messages: [request] },
-			{ signal, reasoning: ctx.thinkingLevel === "off" ? undefined : ctx.thinkingLevel }).result();
-		if (response.stopReason !== "stop") throw new Error(`Controller review ended with ${response.stopReason}.`);
-		return response.content.filter((part): part is { type: "text"; text: string } => part.type === "text").map((part) => part.text).join("\n");
-	}
-
-	async function establishContract(ctx: ExtensionContext, request: string, selected: string,
-		filePaths: string[] | undefined, candidates: Requirement[] | undefined, signal?: AbortSignal): Promise<TaskState> {
-		const sources = await requirementSources(request, ctx.cwd, selected, filePaths);
-		const input = JSON.stringify({ sources, candidate_requirements: candidates ?? [] });
-		const extracted = parseContractItems(await modelText(ctx, CONTRACT_EXTRACTION_PROMPT, input, signal), sources);
-		return newTask(request, extracted, sources);
-	}
-
 	async function runPlanner(ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {
-		if (!state || !projectRoot || state.phase !== "plan" || state.lastVerification?.status !== "fail") {
-			throw new Error("Planner requires an actual failed Godot verification recorded by the Controller.");
-		}
+		if (!state || state.phase !== "plan" || !projectRoot) throw new Error("A failed project verification is required before planning.");
 		if (!ctx.model) throw new Error("No model is selected for the Planner.");
 		const overview = await inspectProject(projectRoot);
 		const input = await plannerInput(state, overview);
@@ -146,8 +102,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 			if (response.stopReason !== "stop") throw new Error(`Planner request ended with ${response.stopReason}${response.errorMessage ? `: ${response.errorMessage}` : ""}.`);
 			try {
 				const raw = response.content.filter((part): part is { type: "text"; text: string } => part.type === "text").map((part) => part.text).join("\n");
-				const plan = parsePlannerOutput(raw);
-				state = acceptPlan(state, plan);
+				state = acceptPlan(state, parsePlannerOutput(raw));
 				persist();
 				return state.phase === "stopped" ? nextInstruction(state) : generatorHandoff(state);
 			} catch (error) {
@@ -160,11 +115,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	async function verify(root: string, ctx: ExtensionContext, signal?: AbortSignal): Promise<{ result: Verification; handoff: string }> {
 		if (state?.phase === "done" || state?.phase === "stopped") throw new Error("This task has ended. Start a new task before verifying again.");
-		const submittedFingerprint = await projectFingerprint(root);
-		let result = await verifyProject({ project: root, godot, signal });
-		const currentFingerprint = await projectFingerprint(root);
-		if (submittedFingerprint !== currentFingerprint) result = { status: "infrastructure", stage: "revision", score: 0,
-			fingerprint: currentFingerprint, errors: [{ stage: "revision", message: "Project files changed during verification; submit the current workset again." }] };
+		const result = await verifyProject({ project: root, godot, signal });
 		if (state) { state = recordVerification(state, result); persist(); }
 		let handoff = result.status === "infrastructure" ? "Godot infrastructure failed. Report or resolve the environment error; this does not trigger planning." : state ? nextInstruction(state) : "";
 		if (state?.phase === "plan") {
@@ -197,37 +148,17 @@ export default function godotPat(pi: ExtensionAPI): void {
 		inputRevision++;
 	});
 
-	pi.on("tool_call", (event) => {
-		if (!state?.projectPath) return;
-		if (inputRevision > selectedInputRevision && event.toolName === "godot_set_project") return;
-		if (inputRevision > selectedInputRevision && (state.phase === "done" || state.phase === "stopped")) return;
-		if (state.phase === "done" || state.phase === "stopped") {
-			return { block: true, terminate: true, reason: "This LTGD task has ended. Report the result and wait for a new user request." };
-		}
-		if (state.phase === "plan") {
-			if (event.toolName === "godot_verify" || event.toolName === "godot_get_errors") return;
-			return { block: true, terminate: true, reason: "Planning is pending. Resume with godot_verify; do not edit or inspect unrelated work." };
-		}
-		if (state.phase === "review") {
-			if (event.toolName === "godot_finish" || REVIEW_READ_TOOLS.has(event.toolName)) return;
-			return { block: true, terminate: true, reason: "Godot passed. Review only the original requirements and call godot_finish. Editing, shell commands, and optional polish are blocked." };
-		}
-	});
-
 	pi.on("before_agent_start", (event) => {
 		if (event.prompt.trim() && (!state?.projectPath || state.phase === "done" || state.phase === "stopped")) latestUserRequest = event.prompt.trim();
 		if (!state?.projectPath || state.phase === "done" || state.phase === "stopped") {
-			return { systemPrompt: event.systemPrompt + "\n\nIf the user requests Godot game development with LTGD, call godot_set_project to activate the workflow. Include task specification files in specification_files; the Controller extracts the requirement list before generation. When choosing shared assets, inspect relevant directory names first and use only paths confirmed by that listing. For other tasks, leave LTGD tools unused." };
+			return { systemPrompt: event.systemPrompt + "\n\nIf the user requests Godot game development with LTGD, call godot_set_project to activate the workflow. For other tasks, leave LTGD tools unused." };
 		}
-		return { systemPrompt: event.systemPrompt + `\n\nFor the selected LTGD Godot game, follow this workflow:
+		return { systemPrompt: event.systemPrompt + `\n\nWhen working on the selected LTGD Godot game, follow this workflow; for unrelated requests, use Pi normally:
 - You are the Generator. Keep Pi's current directory. The selected project is ${state.projectPath}.
 - Use godot_inspect_project and godot_inspect_scene for concise context. Read raw files only for edits. Keep all project files inside the selected directory.
-- For shared assets, inspect only directories relevant to the game's needs. Use paths confirmed by actual listings; do not guess pack locations. Once enough assets are chosen, stop browsing and build the game.
-- After completing the current workset, call godot_verify with a completed/unresolved evidence report for every active ID. Only an actual Godot verification failure lets the Controller call the isolated Planner. You cannot request planning yourself. Implement the whole resulting plan before verifying again.
-- Work only on the original requirements, confirmed missing requirements, or the current Godot repair plan. Do not add optional goals.
-- When no authorized workset item remains unmet, submit the whole workset to godot_verify immediately. Do not start an open-ended polish or inspection pass.
+- After completing the current workset, call godot_verify with a completed/unresolved evidence report for every active ID. On failure the extension automatically calls an isolated, short-context Planner. Implement its whole plan before verifying again; do not call a separate planning tool.
 - If a session resumes with a pending plan, call godot_verify to resume planning without another Godot run.
-- A Godot pass proves import and headless boot only. Review only the original requirements and call godot_finish before claiming completion. After a pass, no project edit or shell command is allowed until the Controller confirms a missing original requirement.
+- A Godot pass proves import and headless boot only. Review every original requirement and call godot_finish before claiming completion. After a pass, do not modify the game for optional improvements; only a specific missing original requirement warrants further work.
 - Do not modify shared assets/ or Godot_Engine/.` };
 	});
 
@@ -245,30 +176,28 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "godot_set_project", label: "Select Godot project",
-		description: "Select the game output directory and extract requirements from the user task and specification files. Omit project to use game/ under Pi's current directory. List task specification files; instruction.md and task.toml in the current or selected directory are read automatically. Candidate requirements are hints only. Set new_task only after a new user request.",
+		description: "Activate a Godot game task and select its output directory. Omit project to use game/ under Pi's current directory. Supply concise requirements from the user's request; if omitted, the full goal becomes one requirement. Set new_task only after a new user request to start another game; an active task's requirements cannot be replaced.",
 		parameters: Type.Object({
 			project: Type.Optional(Type.String({ description: "User-specified project or output directory; relative paths start from Pi's current directory" })),
 			new_task: Type.Optional(Type.Boolean({ description: "Start a new Godot game task even if another project is active" })),
-			specification_files: Type.Optional(Type.Array(Type.String(), { description: "Paths to every referenced task specification file, relative to Pi's current directory unless absolute" })),
-			requirements: Type.Optional(Type.Array(Type.Object({ id: Type.String(), text: Type.String(), doneWhen: Type.Optional(Type.String()) }), { description: "Optional hints; Controller extracts the final list from task sources" })),
+			requirements: Type.Optional(Type.Array(Type.Object({ id: Type.String(), text: Type.String() }), { description: "Stable IDs and concise criteria taken only from the original user request" })),
 		}),
 		executionMode: "sequential",
-		async execute(_id, params, signal, _update, ctx) {
+		async execute(_id, params, _signal, _update, ctx) {
 			if (state?.projectPath) {
-				if (!params.new_task && state.phase === "generate" && state.attempts === 0 && !state.plan.length && !state.pendingRequirementIds?.length) {
+				if (!params.new_task && state.phase === "generate" && state.attempts === 0 && !state.plan.length && !state.pendingRequirements?.length) {
 					return { content: [{ type: "text", text: `Godot project already selected: ${state.projectPath}. Requirements remain fixed for this task.` }], details: { project: state.projectPath } };
 				}
 				if (!params.new_task) throw new Error("Use new_task after a new user request to start another Godot game task; current requirements cannot be replaced.");
 				if (inputRevision <= selectedInputRevision) throw new Error("A new user request is required before starting another Godot game task.");
 			}
 			const selected = path.resolve(ctx.cwd, params.project?.trim() || "game");
-			const task = await establishContract(ctx, latestUserRequest, selected, params.specification_files, params.requirements, signal);
 			await fs.mkdir(selected, { recursive: true });
 			projectRoot = selected;
-			state = { ...task, projectPath: selected };
+			state = { ...newTask(latestUserRequest || "Godot game development task", params.requirements), projectPath: selected };
 			selectedInputRevision = inputRevision;
 			persist();
-			return { content: [{ type: "text", text: `Selected Godot project: ${selected}. Game requirements:\n${state.requirements.map((item) => `- ${item.id}: ${item.text} | done when: ${item.doneWhen}`).join("\n")}\nSource quotes are retained in the Controller state. Create and edit project files there; all godot_* tools use this directory.` }], details: { project: selected } };
+			return { content: [{ type: "text", text: `Selected Godot project: ${selected}. Requirements: ${state.requirements.map((item) => `${item.id}: ${item.text}`).join("; ")}. Create and edit project files there; all godot_* tools use this directory.` }], details: { project: selected } };
 		},
 	});
 
@@ -296,13 +225,14 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "godot_verify", label: "Verify Godot project",
-		description: "Report the whole current workset as completed or unresolved. Godot import and boot run only when all items are complete. A real failure triggers the short-context Planner.",
+		description: "Report every active workset item as completed or unresolved. Godot import and boot run only when all items are completed. On failure, request a short-context plan. A passed, unchanged project reuses its result. After a pass, changes must be tied to an original requirement ID.",
 		parameters: Type.Object({
 			workset_checks: Type.Optional(Type.Array(Type.Object({
 				id: Type.String(),
 				status: Type.Union([Type.Literal("completed"), Type.Literal("unresolved")]),
 				evidence: Type.String(),
 			}), { description: "Required for an actual Godot verification: report every current workset ID exactly once" })),
+			reopen_requirement_id: Type.Optional(Type.String({ description: "Original requirement ID that justified editing after the previous Godot pass" })),
 		}), executionMode: "sequential",
 		async execute(_id, params, signal, _update, ctx) {
 			if (!(await hasProjectFile(projectRoot))) throw new Error(`No project.godot in ${projectRoot || "a selected directory"}. Select or create the project first.`);
@@ -319,12 +249,24 @@ export default function godotPat(pi: ExtensionAPI): void {
 				}
 				return { content: [{ type: "text", text: `${compact(previous)}\n${handoff}` }], details: previous };
 			}
-			if (state.phase !== "generate") throw new Error("Verify only after completing the current generation workset; use godot_finish after a pass.");
+			if (state?.phase === "review" && state.lastVerification?.status === "pass") {
+				const fingerprint = await projectFingerprint(projectRoot);
+				if (fingerprint === state.lastVerification.fingerprint) {
+					return { content: [{ type: "text", text: `${compact(state.lastVerification)}\nProject unchanged; reused the last successful verification. ${nextInstruction(state)}` }], details: state.lastVerification };
+				}
+				const id = params.reopen_requirement_id?.trim();
+				if (!id || !state.requirements.some((item) => item.id === id)) throw new Error("Project changed after Godot passed. Name the unmet original requirement in reopen_requirement_id before re-verifying.");
+				const { workset, unresolved } = validateWorksetChecks(state, params.workset_checks, id);
+				if (unresolved.length) return { content: [{ type: "text", text: incompleteWorksetMessage(workset, unresolved) }], details: { source: workset.source, unresolved } };
+				state = { ...state, phase: "generate", pendingRequirements: [id], plan: [], planObjective: undefined, solved: [] };
+				persist();
+			}
 			const { workset, unresolved } = validateWorksetChecks(state, params.workset_checks);
 			if (unresolved.length) return { content: [{ type: "text", text: incompleteWorksetMessage(workset, unresolved) }], details: { source: workset.source, unresolved } };
-			if (state.pendingRequirementIds?.length && state.lastVerification?.status === "pass" && await projectFingerprint(projectRoot) === state.lastVerification.fingerprint) {
+			if (state.pendingRequirements?.length && state.lastVerification?.status === "pass" && await projectFingerprint(projectRoot) === state.lastVerification.fingerprint) {
 				return { content: [{ type: "text", text: `No project files changed since review found missing requirements. ${nextInstruction(state)}` }], details: state.lastVerification };
 			}
+			if (workset.source === "planner") state = recordCompletedWorkset(state, params.workset_checks!, await projectFingerprint(projectRoot));
 			const { result, handoff } = await verify(projectRoot, ctx, signal);
 			return { content: [{ type: "text", text: `${compact(result)}\n${handoff}` }], details: result };
 		},
@@ -341,23 +283,20 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "godot_finish", label: "Complete verified game task",
-		description: "Review each original requirement after Godot passes. Missing requirements return directly to generation; otherwise finish with concrete evidence and disclose human playtest needs.",
+		description: "Review every original requirement after Godot passes. Missing items return the task to generation; otherwise finish with concrete evidence and disclose human playtest needs.",
 		executionMode: "sequential",
 		parameters: Type.Object({ checks: Type.Array(Type.Object({
 			id: Type.String({ description: "Original requirement ID" }),
 			status: Type.Union([Type.Literal("implemented"), Type.Literal("needs_playtest"), Type.Literal("missing")]),
 			evidence: Type.String({ description: "Specific implementation evidence, missing behavior, or remaining playtest need" }),
-			expected: Type.Optional(Type.String({ description: "What the original requirement demands" })),
-			observed: Type.Optional(Type.String({ description: "What the current game does" })),
 		})) }),
 		async execute(_id, params) {
 			if (!state || !projectRoot) throw new Error("Select an active project first.");
 			const current = await inspectProject(projectRoot);
-			if (state.lastVerification?.fingerprint !== current.fingerprint) throw new Error("Verify the current project files before finishing.");
 			state = finishTask(state, params.checks, current.fingerprint);
 			persist();
-			if (state.phase === "generate") return { content: [{ type: "text", text: `Review found missing original requirements. ${nextInstruction(state)}` }], details: { missing: state.pendingRequirementIds ?? [], needsPlaytest: [] as string[] } };
-			const playtests = (state.completionEvidence as typeof params.checks).filter((check) => check.status === "needs_playtest").map((check) => check.id);
+			if (state.phase === "generate") return { content: [{ type: "text", text: `Review found missing original requirements. ${nextInstruction(state)}` }], details: { missing: state.pendingRequirements ?? [], needsPlaytest: [] as string[] } };
+			const playtests = params.checks.filter((check) => check.status === "needs_playtest").map((check) => check.id);
 			return { content: [{ type: "text", text: `Task recorded as done. Report implemented behavior and Godot verification evidence.${playtests.length ? ` Explicitly disclose that ${playtests.join(", ")} still need human playtesting.` : ""}` }], details: { missing: [] as string[], needsPlaytest: playtests } };
 		},
 	});

@@ -3,9 +3,9 @@ import path from "node:path";
 import type { DecompositionPlan, Failure, TaskState } from "./controller.ts";
 import type { ProjectIndex } from "./project.ts";
 
-export const PLANNER_SYSTEM_PROMPT = `You are the Planner for a Godot game development task. The Controller calls you only after an actual Godot verification failure. Plan only the repair of the latest observed failure. You cannot run tools or edit files. Distinguish observed evidence from hypotheses. Do not invent optional improvements.
+export const PLANNER_SYSTEM_PROMPT = `You are the Planner for a Godot game development task. The Generator's latest Godot verification failed. Analyze the original requirement, all distinct errors from this verification, and any current code excerpts. You cannot run tools or edit files. Every subtask must address an observed error from this latest formal verification; distinguish a supported diagnosis from a hypothesis. Preserve the original requirement and do not invent optional improvements.
 
-Return one JSON object. If project files need revision, return {"decision":"revise","reason":"...","objective":"Fix the current Godot failure","subtasks":[{"id":"S1","problem":"...","goal":"...","suggested_files":["res://...godot"]}]}. Subtasks must be ordered and nonempty; suggested_files is optional and only a hint. If the evidence does not support a project-code change, return {"decision":"cannot_resolve_in_project","reason":"...","evidence":["..."]} and no subtasks. Do not prescribe optional checks or dependencies. Return JSON only.`;
+Return one JSON object. If project files need revision, return {"decision":"revise","reason":"...","objective":"...","subtasks":[{"id":"S1","problem":"...","goal":"...","suggested_files":["res://...godot"]}]}. Subtasks must be ordered and nonempty; suggested_files is optional and only a hint. If the evidence does not support a project-code change, return {"decision":"cannot_resolve_in_project","reason":"...","evidence":["..."]} and no subtasks. Distinguish observed evidence from hypotheses. Do not prescribe exact patches or add checks or dependencies. Return JSON only.`;
 
 interface CodeExcerpt {
 	file: string;
@@ -81,19 +81,19 @@ async function currentCode(root: string, errors: Failure[]): Promise<{ excerpts:
 
 export async function plannerInput(state: TaskState, project: ProjectIndex): Promise<string> {
 	const failure = state.lastVerification;
-	if (failure?.status !== "fail") throw new Error("Planner requires a recorded failed Godot verification.");
-	const errors = failure.errors;
-	const { excerpts, unavailable } = await currentCode(project.project, errors);
+	if (failure?.status !== "fail") throw new Error("Planner requires a failed verification.");
+	const { excerpts, unavailable } = await currentCode(project.project, failure.errors);
 	return JSON.stringify({
 		original_requirement: state.goal,
 		project_overview: {
 			main_scene: project.mainScene ?? null,
 			total_files: project.resources,
-			error_files: [...new Set(errors.map((error) => error.file).filter((file): file is string => !!file))],
+			error_files: [...new Set(failure.errors.map((error) => error.file).filter((file): file is string => !!file))],
 		},
-		latest_failure: { stage: failure.stage, errors, unchanged_attempts: state.unchangedFailureStreak ?? 0 },
+		latest_failure: { stage: failure.stage, errors: failure.errors, unchanged_attempts: state.unchangedFailureStreak ?? 0 },
 		current_code: excerpts,
 		code_unavailable: unavailable,
+		completed_subtasks: state.solved.map(({ id, evidence }) => ({ id, evidence })),
 	});
 }
 
