@@ -126,10 +126,14 @@ test("review checks fixed requirements and sends only missing work back to gener
 	assert.equal(plannedAfterGap.pendingRequirements, undefined, "the Planner handoff should take priority after a failed repair");
 	const done = finishTask(reviewed, [
 		{ id: "R1", status: "implemented", evidence: "Menu scene" },
-		{ id: "R2", status: "needs_playtest", evidence: "Collection code exists; timing needs manual playtest" },
+		{ id: "R2", status: "implemented", evidence: "Collection interaction exists" },
 	], "current");
 	assert.equal(done.phase, "done");
-	assert.deepEqual(done.completionEvidence?.[1], { id: "R2", status: "needs_playtest", evidence: "Collection code exists; timing needs manual playtest" });
+	assert.deepEqual(done.completionEvidence?.[1], { id: "R2", status: "implemented", evidence: "Collection interaction exists" });
+	assert.throws(() => finishTask(reviewed, [
+		{ id: "R1", status: "implemented", evidence: "Menu scene" },
+		{ id: "R2", status: "needs_playtest" as "implemented", evidence: "Unverified" },
+	], "current"), /Invalid status/);
 });
 
 test("Planner may stop without code edits and repeated unchanged failures have a bounded path", () => {

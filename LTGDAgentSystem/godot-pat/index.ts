@@ -29,7 +29,7 @@ function compact(result: Verification): string {
 	for (const error of result.errors.slice(0, 6)) lines.push(`- ${error.file ?? error.stage}${error.line ? `:${error.line}` : ""}: ${error.message}`);
 	if (result.errors.length > 6) lines.push(`${result.errors.length - 6} more distinct errors are in this verification result; the Planner receives all ${result.errors.length}.`);
 	if (result.warnings?.length) lines.push(`${result.warnings.length} non-blocking Godot shutdown diagnostic(s): ${result.warnings[0].message}`);
-	if (result.status === "pass") lines.push("Import and headless boot passed. Gameplay and visual requirements still require review/playtesting.");
+	if (result.status === "pass") lines.push("Import and headless boot passed. Review the original game requirements before completion.");
 	return lines.join("\n");
 }
 
@@ -45,8 +45,8 @@ function nextInstruction(state: TaskState): string {
 		const workset = activeWorkset(state);
 		return `Current ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal.length > 160 ? `${item.goal.slice(0, 157)}...` : item.goal}`).join("; ")}. Build these features, then call godot_verify. Use direct play or inspection during generation only when needed to implement them; do not start an open-ended polish pass.`;
 	}
-	if (state.phase === "review") return `Godot import and boot passed. Read-only review: compare each original requirement (${state.requirements.map((item) => `${item.id}: ${item.text}`).join("; ")}) against the original user request, then call godot_finish with one check per ID. Mark a concrete unmet original requirement as missing; mark behavior requiring human playtesting as needs_playtest. Do not edit or run shell commands in this phase.`;
-	if (state.phase === "done") return "Give the user a concise final report with the verification evidence and remaining playtest limits.";
+	if (state.phase === "review") return `Godot import and boot passed. Read-only review: compare each original requirement (${state.requirements.map((item) => `${item.id}: ${item.text}`).join("; ")}) against the original user request, then call godot_finish with one check per ID. Mark a concrete unmet original requirement as missing. Ignore optional polish; do not edit or run shell commands in this phase.`;
+	if (state.phase === "done") return "Give the user a concise final report with the verification and requirement review evidence.";
 	if (state.phase === "stopped") return `Stop automatic retries and report the blocker: ${state.plannerError ?? "repeated identical failure"}.`;
 	return "Planner is running; wait for its structured handoff.";
 }
@@ -72,7 +72,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 				delete restored.integrationChecks;
 				state = {
 					...restored,
-					schemaVersion: 5,
+					schemaVersion: 6,
 					requirements: loaded.requirements?.length ? loaded.requirements : [{ id: "R1", text: loaded.goal }],
 					phase: legacyDone ? "review" : ["direct", "repair", "execute_plan"].includes(loaded.phase) ? "generate" : loaded.phase as TaskState["phase"],
 					plan: (loaded.plan ?? []).map((task) => ({
@@ -277,21 +277,20 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "godot_finish", label: "Complete verified game task",
-		description: "Review every original requirement after Godot passes. Missing items return the task to generation; otherwise finish with concrete evidence and disclose human playtest needs.",
+		description: "Review every original requirement after Godot passes. Missing items return the task to generation; otherwise finish with concrete evidence.",
 		executionMode: "sequential",
 		parameters: Type.Object({ checks: Type.Array(Type.Object({
 			id: Type.String({ description: "Original requirement ID" }),
-			status: Type.Union([Type.Literal("implemented"), Type.Literal("needs_playtest"), Type.Literal("missing")]),
-			evidence: Type.String({ description: "Specific implementation evidence, missing behavior, or remaining playtest need" }),
+			status: Type.Union([Type.Literal("implemented"), Type.Literal("missing")]),
+			evidence: Type.String({ description: "Specific implementation evidence or missing behavior" }),
 		})) }),
 		async execute(_id, params) {
 			if (!state || !projectRoot) throw new Error("Select an active project first.");
 			const current = await inspectProject(projectRoot);
 			state = finishTask(state, params.checks, current.fingerprint);
 			persist();
-			if (state.phase === "generate") return { content: [{ type: "text", text: `Review found missing original requirements. ${nextInstruction(state)}` }], details: { missing: state.pendingRequirements ?? [], needsPlaytest: [] as string[] } };
-			const playtests = params.checks.filter((check) => check.status === "needs_playtest").map((check) => check.id);
-			return { content: [{ type: "text", text: `Task recorded as done. Report implemented behavior and Godot verification evidence.${playtests.length ? ` Explicitly disclose that ${playtests.join(", ")} still need human playtesting.` : ""}` }], details: { missing: [] as string[], needsPlaytest: playtests } };
+			if (state.phase === "generate") return { content: [{ type: "text", text: `Review found missing original requirements. ${nextInstruction(state)}` }], details: { missing: state.pendingRequirements ?? [] } };
+			return { content: [{ type: "text", text: "Task recorded as done. Report implemented behavior and Godot verification evidence." }], details: { missing: [] as string[] } };
 		},
 	});
 

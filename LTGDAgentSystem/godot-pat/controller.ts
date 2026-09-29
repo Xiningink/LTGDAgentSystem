@@ -31,7 +31,7 @@ export interface Requirement {
 
 export interface RequirementCheck {
 	id: string;
-	status: "implemented" | "needs_playtest" | "missing";
+	status: "implemented" | "missing";
 	evidence: string;
 }
 
@@ -51,7 +51,7 @@ export interface DecompositionPlan {
 }
 
 export interface TaskState {
-	schemaVersion: 5;
+	schemaVersion: 6;
 	goal: string;
 	requirements: Requirement[];
 	pendingRequirements?: string[];
@@ -78,7 +78,7 @@ export function newTask(goal: string, requirements?: Requirement[]): TaskState {
 		if (seen.has(item.id)) throw new Error("Requirement IDs must be unique.");
 		seen.add(item.id);
 	}
-	return { schemaVersion: 5, goal, requirements: selected, phase: "generate", attempts: 0, plan: [] };
+	return { schemaVersion: 6, goal, requirements: selected, phase: "generate", attempts: 0, plan: [] };
 }
 
 export function recordVerification(state: TaskState, result: Verification): TaskState {
@@ -172,7 +172,7 @@ export function finishTask(state: TaskState, checks: RequirementCheck[], fingerp
 	for (const check of checks) {
 		if (!check || typeof check !== "object") throw new Error("Each requirement check must be an object.");
 		if (!expected.has(check.id) || seen.has(check.id)) throw new Error("Requirement checks must use each original ID exactly once.");
-		if (!["implemented", "needs_playtest", "missing"].includes(check.status)) throw new Error(`Invalid status for ${check.id}.`);
+		if (!["implemented", "missing"].includes(check.status)) throw new Error(`Invalid status for ${check.id}.`);
 		nonempty(check.evidence, `Evidence for ${check.id}`);
 		seen.add(check.id);
 	}
