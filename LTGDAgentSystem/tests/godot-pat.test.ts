@@ -27,6 +27,11 @@ test("project selection creates game/ only for an unspecified output path", asyn
 		} as unknown as ExtensionAPI);
 		const ctx = { cwd, sessionManager: { getBranch: () => [] } };
 		await handlers.get("session_start")?.({}, ctx);
+		assert.equal(handlers.has("tool_call"), false, "loading LTGD must not block ordinary Pi tools");
+		assert.equal(handlers.has("agent_end"), false, "unrelated turns must not trigger automatic Godot verification");
+		const unrelated = await handlers.get("before_agent_start")?.({ prompt: "List my notes", systemPrompt: "BASE" }, ctx) as { systemPrompt: string };
+		assert.match(unrelated.systemPrompt, /For other tasks, leave LTGD tools unused/);
+		assert.equal(entries.length, 0, "an unrelated request must not start a Godot task");
 		await handlers.get("input")?.({ source: "user", text: "Build in output/AS/HorrorSignalLost" }, ctx);
 		type TestTool = { execute: (id: string, params: object, signal: undefined, update: undefined, context: object) => Promise<{ content: { text: string }[] }> };
 		const select = tools.get("godot_set_project") as TestTool;
@@ -42,8 +47,7 @@ test("project selection creates game/ only for an unspecified output path", asyn
 		const inspected = await inspect.execute("inspect", {}, undefined, undefined, ctx);
 		assert.equal(JSON.parse(inspected.content[0].text).mainScene, "res://Main.tscn");
 		await handlers.get("input")?.({ source: "user", text: "Start a new game without an output path" }, ctx);
-		assert.equal((entries.at(-1) as { projectPath?: string }).projectPath, undefined);
-		await select.execute("select", {}, undefined, undefined, ctx);
+		await select.execute("select", { new_task: true }, undefined, undefined, ctx);
 		assert.equal((entries.at(-1) as { projectPath: string }).projectPath, path.join(cwd, "game"));
 		assert.equal(await fs.stat(path.join(cwd, "game")).then((item) => item.isDirectory()), true);
 		assert.equal(ctx.cwd, cwd);
@@ -54,7 +58,7 @@ test("project selection creates game/ only for an unspecified output path", asyn
 });
 
 test("first failed verification plans immediately; one full-plan pass enters review", () => {
-	const failure: Verification = { status: "fail", stage: "import", errors: [{ stage: "import", message: "parse error" }], score: 0, fingerprint: "a", evidence: "report.json" };
+	const failure: Verification = { status: "fail", stage: "import", errors: [{ stage: "import", message: "parse error" }], score: 0, fingerprint: "a" };
 	const plan = recordVerification(newTask("Build a game"), failure);
 	assert.equal(plan.phase, "plan");
 	const decomposition: DecompositionPlan = {
@@ -98,7 +102,7 @@ test("Planner receives every verification error and nearby current code without 
 		await fs.writeFile(path.join(root, "Player.gd"), source);
 		const errors = Array.from({ length: 20 }, (_, index) => ({ stage: "import", file: "res://Player.gd", line: index + 15, message: `error ${index}: ${"x".repeat(500)}` }));
 		errors.push({ stage: "import", file: "../outside.gd", line: 1, message: "outside" });
-		const state = recordVerification(newTask("Build a game"), { status: "fail", stage: "import", errors, score: 0, fingerprint: "x", evidence: "report.json" });
+		const state = recordVerification(newTask("Build a game"), { status: "fail", stage: "import", errors, score: 0, fingerprint: "x" });
 		const input = JSON.parse(await plannerInput(state, { project: root, mainScene: "res://Main.tscn", scenes: [], scripts: ["Player.gd"], resources: 2, fingerprint: "x" }));
 		assert.equal(input.latest_failure.errors.length, 21);
 		assert.equal(input.latest_failure.errors[19].message.length, 510);
@@ -108,7 +112,7 @@ test("Planner receives every verification error and nearby current code without 
 		assert.deepEqual(input.completed_subtasks, []);
 		assert.equal(parsePlannerOutput('```json\n{"objective":"x","subtasks":[{"id":"S1","problem":"p","goal":"g"}]}\n```').objective, "x");
 		assert.throws(() => parsePlannerOutput("not json"));
-		assert.equal(recordVerification(newTask("Game"), { status: "infrastructure", stage: "godot", errors: [], score: 0, fingerprint: "x", evidence: "report.json" }).phase, "generate");
+		assert.equal(recordVerification(newTask("Game"), { status: "infrastructure", stage: "godot", errors: [], score: 0, fingerprint: "x" }).phase, "generate");
 	} finally {
 		if (!root.startsWith(os.tmpdir() + path.sep)) throw new Error("Refusing to remove a non-temporary project directory.");
 		await fs.rm(root, { recursive: true, force: true });
@@ -126,10 +130,27 @@ test("Godot parsing keeps early, late, and long distinct errors", () => {
 	assert.ok(parsed[0].message.length > 400);
 });
 
+test("godot_get_errors exposes the full in-session result without a report file", async () => {
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const tools = new Map<string, unknown>();
+	const errors = Array.from({ length: 8 }, (_, index) => ({ stage: "import", message: `failure ${index}` }));
+	const saved = recordVerification(newTask("Build a game"), { status: "fail", stage: "import", errors, score: 0, fingerprint: "x" });
+	godotPat({
+		on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(name, handler); },
+		registerTool(tool: { name: string }) { tools.set(tool.name, tool); }, registerCommand() {}, appendEntry() {},
+	} as unknown as ExtensionAPI);
+	const ctx = { cwd: os.tmpdir(), sessionManager: { getBranch: () => [{ type: "custom", customType: "godot-pat-state", data: saved }] } };
+	await handlers.get("session_start")?.({}, ctx);
+	const getErrors = tools.get("godot_get_errors") as { execute: () => Promise<{ content: { text: string }[] }> };
+	const result = await getErrors.execute();
+	assert.match(result.content[0].text, /failure 7/);
+	assert.match(result.content[0].text, /8 distinct errors/);
+});
+
 test("legacy done without completion evidence resumes at review; versioned done stays done", async () => {
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-	const legacy = { ...newTask("Old game"), phase: "done", lastVerification: { status: "pass" }, schemaVersion: undefined };
-	const current = { ...newTask("New game"), phase: "done", completionEvidence: ["checked"] };
+	const legacy = { ...newTask("Old game"), projectPath: os.tmpdir(), phase: "done", lastVerification: { status: "pass" }, schemaVersion: undefined };
+	const current = { ...newTask("New game"), projectPath: os.tmpdir(), phase: "done", completionEvidence: ["checked"] };
 	let saved: unknown = legacy;
 	const entries: TaskState[] = [];
 	godotPat({
@@ -143,9 +164,8 @@ test("legacy done without completion evidence resumes at review; versioned done 
 	assert.match(resumed.messages[0].sections["ltgd-current-state"], /Phase: review/);
 	saved = current;
 	await handlers.get("session_tree")?.({}, ctx);
-	const fresh = await handlers.get("context_with_system")?.({ messages: [system] }, ctx) as { messages: { sections: Record<string, string> }[] };
-	assert.match(fresh.messages[0].sections["ltgd-current-state"], /Phase: done/);
-	assert.match(fresh.messages[0].sections["ltgd-current-state"], /final report/);
+	const fresh = await handlers.get("context_with_system")?.({ messages: [system] }, ctx);
+	assert.equal(fresh, undefined, "completed Godot tasks must not affect later unrelated requests");
 	assert.equal(entries.length, 0);
 });
 
@@ -153,14 +173,15 @@ test("a malformed isolated Planner response gets one bounded retry", async () =>
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-planner-retry-"));
 	try {
 		await fs.writeFile(path.join(root, "project.godot"), 'config_version=5\n\n[application]\nrun/main_scene="res://Main.tscn"\n');
-		const failure: Verification = { status: "fail", stage: "structure", errors: [{ stage: "structure", message: "No scene" }], score: 0, fingerprint: "x", evidence: "report.json" };
+		const failure: Verification = { status: "fail", stage: "structure", errors: [{ stage: "structure", message: "No scene" }], score: 0, fingerprint: "x" };
 		const saved: TaskState = { ...recordVerification(newTask("Build a game"), failure), projectPath: root };
 		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+		const tools = new Map<string, unknown>();
 		const entries: TaskState[] = [];
 		let calls = 0;
 		godotPat({
 			on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(name, handler); },
-			registerTool() {}, registerCommand() {}, appendEntry(_name: string, data: unknown) { entries.push(data as TaskState); },
+			registerTool(tool: { name: string }) { tools.set(tool.name, tool); }, registerCommand() {}, appendEntry(_name: string, data: unknown) { entries.push(data as TaskState); },
 		} as unknown as ExtensionAPI);
 		const ctx = {
 			cwd: root, model: { provider: "test", id: "mock" }, thinkingLevel: "off",
@@ -173,10 +194,13 @@ test("a malformed isolated Planner response gets one bounded retry", async () =>
 			sessionManager: { getBranch: () => [{ type: "custom", customType: "godot-pat-state", data: saved }] },
 		};
 		await handlers.get("session_start")?.({}, ctx);
-		const resumed = await handlers.get("before_agent_start")?.({ prompt: "", systemPrompt: "BASE" }, ctx) as { message?: { content: string } };
+		await handlers.get("before_agent_start")?.({ prompt: "List unrelated files", systemPrompt: "BASE" }, ctx);
+		assert.equal(calls, 0, "unrelated requests must not resume a pending Planner automatically");
+		type TestTool = { execute: (id: string, params: object, signal?: undefined, update?: undefined, context?: object) => Promise<{ content: { text: string }[] }> };
+		const resumed = await (tools.get("godot_verify") as TestTool).execute("resume-plan", {}, undefined, undefined, ctx);
 		assert.equal(calls, 2);
 		assert.equal(entries.at(-1)?.phase, "generate");
-		assert.match(resumed.message?.content ?? "", /Generator plan/);
+		assert.match(resumed.content[0].text, /Generator plan/);
 	} finally {
 		if (!root.startsWith(os.tmpdir() + path.sep)) throw new Error("Refusing to remove a non-temporary project directory.");
 		await fs.rm(root, { recursive: true, force: true });
@@ -258,26 +282,23 @@ test("failed verification calls a short-context Planner and hands its whole plan
 test("scene inspection and Godot verification use a disposable project", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-test-"));
 	const project = path.join(root, "game");
-	const runs = path.join(root, "runs");
 	await fs.mkdir(project);
 	await fs.writeFile(path.join(project, "project.godot"), 'config_version=5\n\n[application]\nrun/main_scene="res://Main.tscn"\n');
 	await fs.writeFile(path.join(project, "Main.tscn"), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
 	const before = await inspectProject(project);
 	assert.equal(before.mainScene, "res://Main.tscn");
 	assert.equal((await inspectScene(project, "Main.tscn") as { nodes: unknown[] }).nodes.length, 1);
-	const pass = await verifyProject({ project, godot, runs });
+	const pass = await verifyProject({ project, godot });
 	assert.equal(pass.status, "pass", JSON.stringify(pass));
 	assert.equal((await inspectProject(project)).fingerprint, before.fingerprint);
 	assert.equal((await fs.readdir(project)).includes(".godot"), false);
 	await fs.writeFile(path.join(project, "Main.tscn"), '[gd_scene format=3]\n\n[node name="Main" type="Node"\n');
-	const fail = await verifyProject({ project, godot, runs });
+	const fail = await verifyProject({ project, godot });
 	assert.equal(fail.status, "fail", JSON.stringify(fail));
 	assert.ok(fail.errors.length > 0);
 	assert.ok(parseGodotErrors('ERROR: res://Main.tscn:3 - Parse Error: Expected "]".', "import").length > 0);
 	assert.notEqual(fail.fingerprint, before.fingerprint);
-	assert.ok((await fs.readFile(fail.evidence, "utf8")).includes('"status": "fail"'));
-	// Keep the transient test evidence out of the project being verified.
-	assert.equal(path.dirname(fail.evidence).startsWith(runs), true);
+	assert.equal((await fs.readdir(root)).includes("runs"), false, "verification must not create a runs directory");
 	if (!root.startsWith(os.tmpdir() + path.sep)) throw new Error("Refusing to remove a non-temporary test directory.");
 	await fs.rm(root, { recursive: true, force: true });
 });

@@ -14,7 +14,6 @@ export interface Verification {
 	errors: Failure[];
 	score: number;
 	fingerprint: string;
-	evidence: string;
 }
 
 export interface Subtask {

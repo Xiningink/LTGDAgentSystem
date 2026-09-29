@@ -8,7 +8,6 @@ import { parsePlannerOutput, plannerInput, PLANNER_SYSTEM_PROMPT } from "./plann
 import { inspectProject, inspectScene } from "./project.ts";
 
 const workspace = path.resolve(import.meta.dirname, "../..");
-const runs = path.join(workspace, "runs");
 const godot = path.join(workspace, "Godot_Engine", "Godot_v4.6.2-stable_win64_console.exe");
 
 async function hasProjectFile(root: string): Promise<boolean> {
@@ -28,10 +27,15 @@ async function projectFingerprint(root: string): Promise<string> {
 function compact(result: Verification): string {
 	const lines = [`Godot ${result.status.toUpperCase()} at ${result.stage}; score ${result.score}/10.`];
 	for (const error of result.errors.slice(0, 6)) lines.push(`- ${error.file ?? error.stage}${error.line ? `:${error.line}` : ""}: ${error.message}`);
-	if (result.errors.length > 6) lines.push(`${result.errors.length - 6} more distinct errors are in the verification report; the Planner receives all ${result.errors.length}.`);
-	lines.push(`Evidence: ${result.evidence}`);
+	if (result.errors.length > 6) lines.push(`${result.errors.length - 6} more distinct errors are in this verification result; the Planner receives all ${result.errors.length}.`);
 	if (result.status === "pass") lines.push("Import and headless boot passed. Gameplay and visual requirements still require review/playtesting.");
 	return lines.join("\n");
+}
+
+function completeErrors(result: Verification): string {
+	return [`Godot ${result.status.toUpperCase()} at ${result.stage}; ${result.errors.length} distinct errors.`,
+		...result.errors.map((error) => `- ${error.file ?? error.stage}${error.line ? `:${error.line}` : ""}: ${error.message}`),
+	].join("\n");
 }
 
 function nextInstruction(state: TaskState): string {
@@ -40,14 +44,14 @@ function nextInstruction(state: TaskState): string {
 		: "Implement the request, then call godot_verify. A failure automatically invokes a short-context Planner.";
 	if (state.phase === "review") return "Godot verification passed. Review the original requirements, then call godot_finish with concrete evidence; report any behavior that still needs human playtesting.";
 	if (state.phase === "done") return "Give the user a concise final report with the verification evidence and remaining playtest limits.";
-	if (state.phase === "stopped") return `Stop automatic retries and report the blocker: ${state.plannerError ?? "repeated identical failure or no progress"}.`;
+	if (state.phase === "stopped") return `Stop automatic retries and report the blocker: ${state.plannerError ?? "repeated identical failure"}.`;
 	return "Planner is running; wait for its structured handoff.";
 }
 
 export default function godotPat(pi: ExtensionAPI): void {
 	let state: TaskState | undefined;
-	let initialFingerprint = "";
 	let projectRoot = "";
+	let latestUserRequest = "";
 
 	function persist(): void { if (state) pi.appendEntry("godot-pat-state", state); }
 	function restore(entries: readonly unknown[]): void {
@@ -102,7 +106,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 	async function verify(root: string, ctx: ExtensionContext, signal?: AbortSignal, completed: { id: string; evidence: string }[] = []): Promise<{ result: Verification; handoff: string }> {
 		if (state?.phase === "done" || state?.phase === "stopped") throw new Error("This task has ended. Start a new task before verifying again.");
 		if (state && completed.length) state = recordCompletedSubtasks(state, completed, await projectFingerprint(root));
-		const result = await verifyProject({ project: root, godot, runs, signal });
+		const result = await verifyProject({ project: root, godot, signal });
 		if (state) { state = recordVerification(state, result); persist(); }
 		let handoff = result.status === "infrastructure" ? "Godot infrastructure failed. Report or resolve the environment error; this does not trigger planning." : state ? nextInstruction(state) : "";
 		if (state?.phase === "plan") {
@@ -118,84 +122,65 @@ export default function godotPat(pi: ExtensionAPI): void {
 		return { result, handoff };
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
 		restore(ctx.sessionManager.getBranch());
-		projectRoot = state?.projectPath ?? ((await hasProjectFile(ctx.cwd)) ? path.resolve(ctx.cwd) : "");
-		initialFingerprint = await projectFingerprint(projectRoot);
+		projectRoot = state?.projectPath ?? "";
 	});
-	pi.on("session_tree", async (_event, ctx) => {
+	pi.on("session_tree", (_event, ctx) => {
 		restore(ctx.sessionManager.getBranch());
-		projectRoot = state?.projectPath ?? ((await hasProjectFile(ctx.cwd)) ? path.resolve(ctx.cwd) : "");
-		initialFingerprint = await projectFingerprint(projectRoot);
+		projectRoot = state?.projectPath ?? "";
 	});
 
-	pi.on("input", async (event, ctx) => {
+	pi.on("input", (event) => {
 		if (event.source === "extension" || !event.text.trim()) return;
-		projectRoot = "";
-		state = newTask(event.text.trim());
-		initialFingerprint = "";
-		persist();
+		latestUserRequest = event.text.trim();
 	});
 
-	pi.on("before_agent_start", async (event, ctx) => {
-		if (!state && event.prompt.trim()) {
-			projectRoot = "";
-			state = newTask(event.prompt.trim());
-			initialFingerprint = "";
-			persist();
+	pi.on("before_agent_start", (event) => {
+		if (event.prompt.trim() && (!state?.projectPath || state.phase === "done" || state.phase === "stopped")) latestUserRequest = event.prompt.trim();
+		if (!state?.projectPath || state.phase === "done" || state.phase === "stopped") {
+			return { systemPrompt: event.systemPrompt + "\n\nIf the user requests Godot game development with LTGD, call godot_set_project to activate the workflow. For other tasks, leave LTGD tools unused." };
 		}
-		let restoredHandoff: string | undefined;
-		if (state?.phase === "plan" && projectRoot) {
-			try { restoredHandoff = await runPlanner(ctx, ctx.signal); }
-			catch (error) {
-				state = { ...state, phase: "stopped", plannerError: error instanceof Error ? error.message : String(error) };
-				persist();
-			}
-		}
-		return { message: restoredHandoff ? { customType: "godot-pat-plan", content: restoredHandoff, display: true } : undefined, systemPrompt: event.systemPrompt + `\n\nLTGD Godot workflow:
-- You are the Generator. Keep Pi's current directory and use godot_set_project before editing. Use the user's output path if supplied; otherwise use game/ under the current directory.
+		return { systemPrompt: event.systemPrompt + `\n\nWhen working on the selected LTGD Godot game, follow this workflow; for unrelated requests, use Pi normally:
+- You are the Generator. Keep Pi's current directory. The selected project is ${state.projectPath}.
 - Use godot_inspect_project and godot_inspect_scene for concise context. Read raw files only for edits. Keep all project files inside the selected directory.
 - After implementation, call godot_verify. On failure the extension automatically calls an isolated, short-context Planner and returns its complete plan. Implement the whole plan before verifying again; do not call a separate planning tool.
+- If a session resumes with a pending plan, call godot_verify to resume planning without another Godot run.
 - A Godot pass proves import and headless boot only. Review the original requirements and call godot_finish before claiming completion.
 - Do not modify shared assets/ or Godot_Engine/.` };
 	});
 
 	pi.on("context_with_system", (event) => {
 		const active = state;
-		if (!active) return;
+		if (!active?.projectPath || active.phase === "done" || active.phase === "stopped") return;
 		let updated = false;
 		return { messages: event.messages.map((message) => {
 			if (updated || message.role !== "system") return message;
 			updated = true;
-			const current = `Phase: ${active.phase}. Project: ${active.projectPath ?? "not selected"}. Goal: ${active.goal.slice(0, 1000)}.\n${nextInstruction(active)}`;
+			const current = `Use this state only for the selected Godot game; ignore it for unrelated user requests.\nPhase: ${active.phase}. Project: ${active.projectPath}. Goal: ${active.goal.slice(0, 1000)}.\n${nextInstruction(active)}`;
 			return { ...message, sections: { ...message.sections, "ltgd-current-state": `<ltgd-current-state>\n${current}\n</ltgd-current-state>` } };
 		}) };
 	});
 
-	pi.on("tool_call", (event) => {
-		if (!state?.projectPath && ["write", "edit", "bash", "powershell"].includes(event.toolName)) {
-			return { block: true, reason: "Select the project with godot_set_project before editing. Omit its path to use ./game, or pass the user's output path." };
-		}
-		if ((state?.phase === "plan" || state?.phase === "stopped") && ["write", "edit", "bash", "powershell"].includes(event.toolName)) {
-			return { block: true, reason: "Generation is paused. Report the Planner blocker or wait for the structured plan." };
-		}
-	});
-
 	pi.registerTool({
 		name: "godot_set_project", label: "Select Godot project",
-		description: "Select the user's output directory, or omit project to create game/ under Pi's current directory. All Godot checks use this directory.",
-		parameters: Type.Object({ project: Type.Optional(Type.String({ description: "User-specified project or output directory; relative paths start from Pi's current directory" })) }),
+		description: "Activate a Godot game task and select its output directory. Omit project to use game/ under Pi's current directory. Set new_task when starting another game in the same session.",
+		parameters: Type.Object({
+			project: Type.Optional(Type.String({ description: "User-specified project or output directory; relative paths start from Pi's current directory" })),
+			new_task: Type.Optional(Type.Boolean({ description: "Start a new Godot game task even if another project is active" })),
+		}),
 		executionMode: "sequential",
 		async execute(_id, params, _signal, _update, ctx) {
-			if (!state) throw new Error("No active task.");
-			if (state.phase !== "generate" || state.attempts > 0 || state.plan.length || state.solved.length) {
-				throw new Error("Select the project before editing or verifying; start a new task to change projects later.");
+			if (state?.projectPath && !params.new_task && state.phase === "generate" && state.attempts === 0 && !state.plan.length) {
+				return { content: [{ type: "text", text: `Godot project already selected: ${state.projectPath}.` }], details: { project: state.projectPath } };
+			}
+			if (state?.projectPath && !params.new_task && state.phase !== "done" && state.phase !== "stopped" && state.phase !== "review") {
+				throw new Error("Use new_task to start another Godot game task.");
 			}
 			const selected = path.resolve(ctx.cwd, params.project?.trim() || "game");
 			await fs.mkdir(selected, { recursive: true });
 			projectRoot = selected;
-			initialFingerprint = await projectFingerprint(selected);
-			state = { ...state, projectPath: selected, lastVerification: undefined };
+			state = { ...newTask(latestUserRequest || "Godot game development task"), projectPath: selected };
 			persist();
 			return { content: [{ type: "text", text: `Selected Godot project: ${selected}. Create and edit project files there; all godot_* tools use this directory.` }], details: { project: selected } };
 		},
@@ -229,6 +214,17 @@ export default function godotPat(pi: ExtensionAPI): void {
 		parameters: Type.Object({ completed_subtasks: Type.Optional(Type.Array(Type.Object({ id: Type.String(), evidence: Type.String() }))) }), executionMode: "sequential",
 		async execute(_id, params, signal, _update, ctx) {
 			if (!(await hasProjectFile(projectRoot))) throw new Error(`No project.godot in ${projectRoot || "a selected directory"}. Select or create the project first.`);
+			if (state?.phase === "plan" && state.lastVerification?.status === "fail") {
+				const previous = state.lastVerification;
+				let handoff: string;
+				try { handoff = await runPlanner(ctx, signal); }
+				catch (error) {
+					state = { ...state, phase: "stopped", plannerError: error instanceof Error ? error.message : String(error) };
+					persist();
+					handoff = nextInstruction(state);
+				}
+				return { content: [{ type: "text", text: `${compact(previous)}\n${handoff}` }], details: previous };
+			}
 			const { result, handoff } = await verify(projectRoot, ctx, signal, params.completed_subtasks ?? []);
 			return { content: [{ type: "text", text: `${compact(result)}\n${handoff}` }], details: result };
 		},
@@ -236,10 +232,10 @@ export default function godotPat(pi: ExtensionAPI): void {
 
 	pi.registerTool({
 		name: "godot_get_errors", label: "Last Godot errors",
-		description: "Return the last compact verification result without running Godot again.",
+		description: "Return all errors from the last Godot verification without running Godot again.",
 		parameters: Type.Object({}),
 		async execute() {
-			return { content: [{ type: "text", text: state?.lastVerification ? compact(state.lastVerification) : "No verification has run in this task." }], details: {} };
+			return { content: [{ type: "text", text: state?.lastVerification ? completeErrors(state.lastVerification) : "No verification has run in this task." }], details: {} };
 		},
 	});
 
@@ -262,17 +258,4 @@ export default function godotPat(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => ctx.ui.notify(state ? `${state.phase}; project ${projectRoot || "not selected"}; ${state.attempts} verification attempts.\n${state.lastVerification ? compact(state.lastVerification) : "No verification yet."}` : "No active task.", "info"),
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
-		if (!state || state.phase === "done" || state.phase === "stopped" || !projectRoot) return;
-		if (state.phase === "generate" && state.plan.length) return;
-		if (!(await hasProjectFile(projectRoot))) return;
-		const current = await inspectProject(projectRoot);
-		if (current.fingerprint === initialFingerprint || current.fingerprint === state.lastVerification?.fingerprint) return;
-		const { result, handoff } = await verify(projectRoot, ctx);
-		if (result.status === "fail" || result.status === "pass") {
-			pi.sendMessage({ customType: "godot-pat-feedback", content: `${compact(result)}\n${handoff}`, display: true }, { triggerTurn: true, deliverAs: "followUp" });
-		} else {
-			pi.sendMessage({ customType: "godot-pat-feedback", content: compact(result), display: true }, { triggerTurn: false });
-		}
-	});
 }
