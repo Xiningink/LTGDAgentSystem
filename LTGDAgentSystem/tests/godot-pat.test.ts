@@ -4,11 +4,53 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { acceptPlan, completeSubtask, newTask, recordVerification, type Verification } from "../godot-pat/controller.ts";
 import { parseGodotErrors, verifyProject } from "../godot-pat/godot.ts";
+import godotPat from "../godot-pat/index.ts";
 import { inspectProject, inspectScene } from "../godot-pat/project.ts";
 
 const godot = path.resolve(import.meta.dirname, "../../Godot_Engine/Godot_v4.6.2-stable_win64_console.exe");
+
+test("project selection creates game/ only for an unspecified output path", async () => {
+	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-project-selection-"));
+	try {
+		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+		const tools = new Map<string, unknown>();
+		const entries: unknown[] = [];
+		godotPat({
+			on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(name, handler); },
+			registerTool(tool: { name: string }) { tools.set(tool.name, tool); },
+			registerCommand() {},
+			appendEntry(_name: string, data: unknown) { entries.push(data); },
+		} as unknown as ExtensionAPI);
+		const ctx = { cwd, sessionManager: { getBranch: () => [] } };
+		await handlers.get("session_start")?.({}, ctx);
+		await handlers.get("input")?.({ source: "user", text: "Build in output/AS/HorrorSignalLost" }, ctx);
+		type TestTool = { execute: (id: string, params: object, signal: undefined, update: undefined, context: object) => Promise<{ content: { text: string }[] }> };
+		const select = tools.get("godot_set_project") as TestTool;
+		const inspect = tools.get("godot_inspect_project") as TestTool;
+		assert.ok(select && inspect);
+		const explicit = path.join(cwd, "output", "AS", "HorrorSignalLost");
+		await select.execute("select", { project: "output/AS/HorrorSignalLost" }, undefined, undefined, ctx);
+		assert.equal((entries.at(-1) as { projectPath: string }).projectPath, explicit);
+		assert.equal(await fs.stat(explicit).then((item) => item.isDirectory()), true);
+		assert.equal(await fs.stat(path.join(cwd, "game")).then(() => true, () => false), false);
+		await fs.writeFile(path.join(explicit, "project.godot"), 'config_version=5\n\n[application]\nrun/main_scene="res://Main.tscn"\n');
+		await fs.writeFile(path.join(explicit, "Main.tscn"), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+		const inspected = await inspect.execute("inspect", {}, undefined, undefined, ctx);
+		assert.equal(JSON.parse(inspected.content[0].text).mainScene, "res://Main.tscn");
+		await handlers.get("input")?.({ source: "user", text: "Start a new game without an output path" }, ctx);
+		assert.equal((entries.at(-1) as { projectPath?: string }).projectPath, undefined);
+		await select.execute("select", {}, undefined, undefined, ctx);
+		assert.equal((entries.at(-1) as { projectPath: string }).projectPath, path.join(cwd, "game"));
+		assert.equal(await fs.stat(path.join(cwd, "game")).then((item) => item.isDirectory()), true);
+		assert.equal(ctx.cwd, cwd);
+	} finally {
+		if (!cwd.startsWith(os.tmpdir() + path.sep)) throw new Error("Refusing to remove a non-temporary project directory.");
+		await fs.rm(cwd, { recursive: true, force: true });
+	}
+});
 
 test("direct failure gets one repair, then a planner; unchanged failure stops", () => {
 	const failure: Verification = { status: "fail", stage: "import", errors: [{ stage: "import", message: "parse error" }], score: 0, fingerprint: "a", evidence: "report.json" };
@@ -55,7 +97,7 @@ test("scene inspection and Godot verification use a disposable project", async (
 
 test("LTGD launcher adds PaT without Pi developer resources", async () => {
 	const launcher = path.resolve(import.meta.dirname, "../start.ps1");
-	const cwd = path.resolve(import.meta.dirname, "../../games/system");
+	const cwd = path.resolve(import.meta.dirname, "../..");
 	const response = await new Promise<string>((resolve, reject) => {
 		const child = spawn("powershell.exe", ["-NoProfile", "-File", launcher, "--mode", "rpc", "--offline", "--no-session", "--no-approve"], { cwd, windowsHide: true });
 		let output = "";

@@ -10,6 +10,20 @@ const workspace = path.resolve(import.meta.dirname, "../..");
 const runs = path.join(workspace, "runs");
 const godot = path.join(workspace, "Godot_Engine", "Godot_v4.6.2-stable_win64_console.exe");
 
+async function hasProjectFile(root: string): Promise<boolean> {
+	if (!root) return false;
+	try {
+		return (await fs.stat(path.join(root, "project.godot"))).isFile();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
+}
+
+async function projectFingerprint(root: string): Promise<string> {
+	return (await hasProjectFile(root)) ? (await inspectProject(root)).fingerprint : "";
+}
+
 function compact(result: Verification): string {
 	const lines = [`Godot ${result.status.toUpperCase()} at ${result.stage}; score ${result.score}/10.`];
 	for (const error of result.errors.slice(0, 6)) lines.push(`- ${error.file ?? error.stage}${error.line ? `:${error.line}` : ""}: ${error.message}`);
@@ -49,31 +63,36 @@ export default function godotPat(pi: ExtensionAPI): void {
 		return result;
 	}
 
-	pi.on("session_start", (_event, ctx) => {
-		projectRoot = path.resolve(ctx.cwd);
+	pi.on("session_start", async (_event, ctx) => {
 		restore(ctx.sessionManager.getBranch());
+		projectRoot = state?.projectPath ?? ((await hasProjectFile(ctx.cwd)) ? path.resolve(ctx.cwd) : "");
+		initialFingerprint = await projectFingerprint(projectRoot);
 	});
-	pi.on("session_tree", (_event, ctx) => restore(ctx.sessionManager.getBranch()));
+	pi.on("session_tree", async (_event, ctx) => {
+		restore(ctx.sessionManager.getBranch());
+		projectRoot = state?.projectPath ?? ((await hasProjectFile(ctx.cwd)) ? path.resolve(ctx.cwd) : "");
+		initialFingerprint = await projectFingerprint(projectRoot);
+	});
 
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension" || !event.text.trim()) return;
-		projectRoot = path.resolve(ctx.cwd);
+		projectRoot = "";
 		state = newTask(event.text.trim());
-		initialFingerprint = (await inspectProject(projectRoot)).fingerprint;
+		initialFingerprint = "";
 		persist();
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!state && event.prompt.trim()) {
-			projectRoot = path.resolve(ctx.cwd);
+			projectRoot = "";
 			state = newTask(event.prompt.trim());
-			initialFingerprint = (await inspectProject(projectRoot)).fingerprint;
+			initialFingerprint = "";
 			persist();
 		}
 		const phase = state?.phase ?? "direct";
 		const large = state ? state.goal.length > 180 || /(?:完整.*游戏|制作.*游戏|开发.*游戏|build.*game|create.*game)/i.test(state.goal) : false;
 		const prompt = `\n\nLTGD Godot workflow (current phase: ${phase}):
-- Work on the Godot project in the current directory. Keep the user's Pi conversation as the entry point.
+- Keep Pi's current directory. ${state?.projectPath ? `Selected project: ${state.projectPath}.` : "Before editing, call godot_set_project: pass the user's output path if specified; otherwise omit it to create game/ under Pi's current directory."} Write all project files inside the selected directory. Keep the user's Pi conversation as the entry point.
 - ${large ? "This is a large task: make a short 3-7 item milestone sketch, then implement one milestone at a time." : "This is a local task: edit directly without a separate plan."}
 - Use godot_inspect_project and godot_inspect_scene for concise context. Read raw files only for edits.
 - Before claiming a game change is complete, call godot_verify. A passing check proves import and headless boot only; assess gameplay requirements separately.
@@ -85,17 +104,41 @@ ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}`
 	});
 
 	pi.on("tool_call", (event) => {
+		if (!state?.projectPath && ["write", "edit", "bash", "powershell"].includes(event.toolName)) {
+			return { block: true, reason: "Select the project with godot_set_project before editing. Omit its path to use ./game, or pass the user's output path." };
+		}
 		if (state?.phase === "plan" && ["write", "edit", "bash", "powershell"].includes(event.toolName)) {
 			return { block: true, reason: "Planner phase is read-only. Call godot_plan with a concise ordered plan first." };
 		}
 	});
 
 	pi.registerTool({
+		name: "godot_set_project", label: "Select Godot project",
+		description: "Select the user's output directory, or omit project to create game/ under Pi's current directory. All Godot checks use this directory.",
+		parameters: Type.Object({ project: Type.Optional(Type.String({ description: "User-specified project or output directory; relative paths start from Pi's current directory" })) }),
+		executionMode: "sequential",
+		async execute(_id, params, _signal, _update, ctx) {
+			if (!state) throw new Error("No active task.");
+			if (state.phase !== "direct" || state.attempts > 0 || state.plan.length || state.solved.length) {
+				throw new Error("Select the project before editing or verifying; start a new task to change projects later.");
+			}
+			const selected = path.resolve(ctx.cwd, params.project?.trim() || "game");
+			await fs.mkdir(selected, { recursive: true });
+			projectRoot = selected;
+			initialFingerprint = await projectFingerprint(selected);
+			state = { ...state, projectPath: selected, lastVerification: undefined };
+			persist();
+			return { content: [{ type: "text", text: `Selected Godot project: ${selected}. Create and edit project files there; all godot_* tools use this directory.` }], details: { project: selected } };
+		},
+	});
+
+	pi.registerTool({
 		name: "godot_inspect_project", label: "Inspect Godot project",
-		description: "Return a compact index of the current Godot project and its main scene.",
+		description: "Return a compact index of the selected Godot project and its main scene.",
 		parameters: Type.Object({}),
-		async execute(_id, _params, _signal, _update, ctx) {
-			const index = await inspectProject(path.resolve(ctx.cwd));
+		async execute() {
+			if (!(await hasProjectFile(projectRoot))) return { content: [{ type: "text", text: `No project.godot in ${projectRoot || "a selected directory"}. Call godot_set_project first, then create the project there.` }], details: {} };
+			const index = await inspectProject(projectRoot);
 			return { content: [{ type: "text", text: JSON.stringify({ mainScene: index.mainScene, scenes: index.scenes.slice(0, 80), scripts: index.scripts.slice(0, 80), totalFiles: index.resources }) }], details: {} };
 		},
 	});
@@ -104,8 +147,9 @@ ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}`
 		name: "godot_inspect_scene", label: "Inspect Godot scene",
 		description: "Summarize scene nodes, script references, and signal connections without layout noise.",
 		parameters: Type.Object({ scene: Type.String({ description: "Project-relative .tscn path or res:// path" }) }),
-		async execute(_id, params, _signal, _update, ctx) {
-			const scene = await inspectScene(path.resolve(ctx.cwd), params.scene);
+		async execute(_id, params) {
+			if (!projectRoot) throw new Error("Select a project with godot_set_project first.");
+			const scene = await inspectScene(projectRoot, params.scene);
 			return { content: [{ type: "text", text: JSON.stringify(scene) }], details: {} };
 		},
 	});
@@ -114,8 +158,9 @@ ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}`
 		name: "godot_verify", label: "Verify Godot project",
 		description: "Import and boot a disposable project copy in headless Godot; return concise errors and evidence path.",
 		parameters: Type.Object({}), executionMode: "sequential",
-		async execute(_id, _params, signal, _update, ctx) {
-			const result = await verify(path.resolve(ctx.cwd), signal);
+		async execute(_id, _params, signal) {
+			if (!(await hasProjectFile(projectRoot))) throw new Error(`No project.godot in ${projectRoot || "a selected directory"}. Select or create the project first.`);
+			const result = await verify(projectRoot, signal);
 			return { content: [{ type: "text", text: `${compact(result)}\n${state ? nextInstruction(state) : ""}` }], details: result };
 		},
 	});
@@ -145,9 +190,10 @@ ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}`
 		name: "godot_subtask_done", label: "Complete planned subtask",
 		description: "Advance a planned subtask after successful Godot verification and a concrete requirement check.",
 		parameters: Type.Object({ evidence: Type.String({ description: "Concise description of behavior checked" }) }),
-		async execute(_id, params, _signal, _update, ctx) {
+		async execute(_id, params) {
 			if (!state) throw new Error("No active task.");
-			const current = await inspectProject(path.resolve(ctx.cwd));
+			if (!projectRoot) throw new Error("Select a project with godot_set_project first.");
+			const current = await inspectProject(projectRoot);
 			state = completeSubtask(state, params.evidence, current.fingerprint);
 			persist();
 			const next = state.plan[state.currentSubtask];
@@ -157,7 +203,7 @@ ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}`
 
 	pi.registerCommand("godot-status", {
 		description: "Show the Godot-PaT task phase and latest verification",
-		handler: async (_args, ctx) => ctx.ui.notify(state ? `${state.phase}; ${state.attempts} verification attempts.\n${state.lastVerification ? compact(state.lastVerification) : "No verification yet."}` : "No active task.", "info"),
+		handler: async (_args, ctx) => ctx.ui.notify(state ? `${state.phase}; project ${projectRoot || "not selected"}; ${state.attempts} verification attempts.\n${state.lastVerification ? compact(state.lastVerification) : "No verification yet."}` : "No active task.", "info"),
 	});
 
 	pi.on("turn_end", async (event) => {
@@ -170,6 +216,7 @@ ${state ? `Current goal: ${state.goal.slice(0, 500)}\n${nextInstruction(state)}`
 
 	pi.on("agent_end", async (_event, ctx) => {
 		if (!state || state.phase === "stopped" || !projectRoot) return;
+		if (!(await hasProjectFile(projectRoot))) return;
 		const current = await inspectProject(projectRoot);
 		if (current.fingerprint === initialFingerprint || current.fingerprint === state.lastVerification?.fingerprint) return;
 		const result = await verify(projectRoot);

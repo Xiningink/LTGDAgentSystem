@@ -26,6 +26,7 @@ export interface Subtask {
 
 export interface TaskState {
 	goal: string;
+	projectPath?: string;
 	phase: Phase;
 	attempts: number;
 	bestScore: number;
