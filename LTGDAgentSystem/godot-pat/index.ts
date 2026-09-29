@@ -10,7 +10,6 @@ import { inspectProject, inspectScene } from "./project.ts";
 
 const workspace = path.resolve(import.meta.dirname, "../..");
 const godot = path.join(workspace, "Godot_Engine", "Godot_v4.6.2-stable_win64_console.exe");
-const screenshotHelper = path.join(workspace, "LTGDAgentSystem", "tools", "screenshot.ps1");
 
 async function hasProjectFile(root: string): Promise<boolean> {
 	if (!root) return false;
@@ -205,7 +204,6 @@ export default function godotPat(pi: ExtensionAPI): void {
 - You are the Generator. Keep Pi's current directory. The selected project is ${state.projectPath}.
 - Build the game from the user's original task immediately. Do not write an upfront plan, break the task into a long checklist, request a Planner, or create optional objectives. Make only the local implementation decisions needed to code.
 - Implement the complete requested player flow in one focused pass. Read files and run Godot during development only to resolve a concrete implementation blocker. Do not start repeated screenshot, self-test, refactor, visual polish, or minor-issue cycles.
-- A screenshot helper is available at ${screenshotHelper}. Run it from the selected Godot project directory to actually inspect requested UI, battlefield, or result screens, then use Pi's read tool on the saved PNG. PowerShell example: & "${screenshotHelper}" -Out "$env:TEMP\\ltgd-frame.png" -Frames 60. For a specific state add -Scenario battle and use a different output file; the game must read --scenario <id> from OS.get_cmdline_user_args() and set up that state.
 - A flaw you noticed yourself is not a new work item. Fix it now only if it prevents an explicit original requirement or the main player flow from working; otherwise stop and let the Executor review the project.
 - After the requested implementation is present, STOP using tools and end this Generator turn. The Executor automatically performs Godot import, boot, and independent requirement review. Do not call a verification or finish tool, and do not claim the whole task is done before the Executor reports.
 - If the Executor returns a confirmed failure and a Planner handoff, implement only those repair subtasks, then end the turn again. Do not expand the plan into optional improvements.
