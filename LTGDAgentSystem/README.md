@@ -4,7 +4,7 @@
 
 ## 流程
 
-1. `godot_set_project` 读取用户任务及任务文件，用一次独立模型请求提取原始需求。Controller 校验每项 `sourceEvidence` 是否逐字来自原文；进入生成阶段后，当前任务不能替换需求清单。用户消息中写出的 `.md`、`.txt`、`.toml` 路径会被读取，当前目录和所选项目目录中的 `instruction.md`、`task.toml` 也会自动读取。其他文件可通过 `specification_files` 指定。Generator 提供的 `requirements` 仅作为提取提示。
+1. `godot_set_project` 读取用户任务及任务文件，用一次独立模型请求提取游戏交付需求。同一功能的细节合并为一项；运行环境、工具调用和文件读取等流程信息不作为游戏需求。Controller 校验每项 `sourceEvidence` 是否逐字来自原文；进入生成阶段后，当前任务不能替换需求清单。用户消息中写出的 `.md`、`.txt`、`.toml` 路径会被读取，当前目录和所选项目目录中的 `instruction.md`、`task.toml` 也会自动读取。其他文件可通过 `specification_files` 指定。Generator 提供的 `requirements` 仅作为提取提示。
 2. Generator 使用 Pi 原生工具完成当前整组需求，并通过 `godot_verify` 一次提交每项的 `completed`/`unresolved` 报告。有未完成项时继续生成，不运行 Godot。
 3. Verifier 检查项目结构、Godot 导入及无头启动。真正失败时，Controller 调用一次短上下文 Planner。Planner 只接收本次错误、相关代码和简短项目概要，返回整份修复计划；Generator 完成计划后再统一验证。相同错误反复出现会停止自动重试。
 4. Godot PASS 后进入 `review`，逐项检查原始需求。`godot_finish` 发现 `missing` 时，直接把这些原始需求送回 Generator；无缺项时记录完成，并说明仍需人工试玩的内容。

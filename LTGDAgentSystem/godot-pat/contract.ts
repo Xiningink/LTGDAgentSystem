@@ -1,6 +1,10 @@
 import type { Requirement, RequirementSource } from "./controller.ts";
 
-export const CONTRACT_EXTRACTION_PROMPT = `Extract every explicit game requirement from the supplied user request and task files. Include behavior, content, audio, visual, and technical conditions. Split distinct obligations into separate items. Candidate requirements are hints only; read the full sources. Do not add optional improvements. Return only JSON: {"requirements":[{"text":"...","doneWhen":"observable completion condition","sourceEvidence":[{"sourceId":"exact source ID","quote":"exact short excerpt copied from that source"}]}]}. Every item needs an exact source quote.`;
+export const CONTRACT_EXTRACTION_PROMPT = `Create a compact contract for the game that must be delivered, using the supplied user request and task files. Extract all required player-facing behavior, content, audio, visuals, and game-specific delivery conditions. Group details of the same feature into one requirement, with a doneWhen that covers those details; do not make one item per sentence or per adjective. Keep distinct features separate. Treat broad quality goals as one condition, not as a reason to invent extra polish work.
+
+Do not turn instructions for the agent or LTGD workflow into game requirements: reading files, selecting paths, calling tools, browsing/copying assets, running checks, and manual playtesting are process steps. Asset availability and example commands are context. Runner metadata in task.toml (timeouts, CPU, memory, storage, GPU, OS, internet, schema, authors) is not a game feature. The Controller already selects the output directory and verifies Godot startup. Candidate requirements are hints only; read the full sources. Do not add optional improvements.
+
+Return only JSON: {"requirements":[{"text":"...","doneWhen":"observable completion condition","sourceEvidence":[{"sourceId":"exact source ID","quote":"exact short excerpt copied from that source"}]}]}. Every item needs at least one short, exact source quote. Use multiple sourceEvidence entries if needed to support grouped details.`;
 
 export function parseContractItems(raw: string, sources: RequirementSource[]): Requirement[] {
 	let parsed: unknown;

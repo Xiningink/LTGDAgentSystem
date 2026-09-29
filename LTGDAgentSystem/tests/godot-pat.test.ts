@@ -55,9 +55,12 @@ test("Controller extracts once from task.toml and instruction.md before generati
 			} }, sessionManager: { getBranch: () => [] } };
 		await handlers.get("session_start")?.({}, ctx);
 		await handlers.get("input")?.({ source: "user", text: "Build the game from task.toml" }, ctx);
-		await (tools.get("godot_set_project") as TestTool).execute("select", {}, undefined, undefined, ctx);
+		const selected = await (tools.get("godot_set_project") as TestTool).execute("select", {}, undefined, undefined, ctx);
 		assert.equal(calls, 1, "normal initialization uses one extraction request");
 		assert.deepEqual(entries.at(-1)?.requirements.map((item) => item.text), ["Radio scanning", "Jamming"]);
+		assert.match(selected.content[0].text, /R2: Jamming/);
+		assert.doesNotMatch(selected.content[0].text, /jamming = true/, "startup result should not repeat source quotes");
+		assert.equal(entries.at(-1)?.requirements[1].sourceEvidence?.[0].quote, "jamming = true");
 		assert.equal(tools.has("godot_propose_work"), false);
 		assert.equal(tools.has("godot_decompose_work"), false);
 		assert.equal(entries.at(-1)?.schemaVersion, 7);

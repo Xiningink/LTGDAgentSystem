@@ -267,7 +267,7 @@ export default function godotPat(pi: ExtensionAPI): void {
 			state = { ...task, projectPath: selected };
 			selectedInputRevision = inputRevision;
 			persist();
-			return { content: [{ type: "text", text: `Selected Godot project: ${selected}. Requirements:\n${state.requirements.map((item) => `- ${item.id}: ${item.text} | done when: ${item.doneWhen} | source: ${item.sourceEvidence?.map((evidence) => `${evidence.sourceId} [${evidence.quote}]`).join("; ")}`).join("\n")}\nCreate and edit project files there; all godot_* tools use this directory.` }], details: { project: selected } };
+			return { content: [{ type: "text", text: `Selected Godot project: ${selected}. Game requirements:\n${state.requirements.map((item) => `- ${item.id}: ${item.text} | done when: ${item.doneWhen}`).join("\n")}\nSource quotes are retained in the Controller state. Create and edit project files there; all godot_* tools use this directory.` }], details: { project: selected } };
 		},
 	});
 
