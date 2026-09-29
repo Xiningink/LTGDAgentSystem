@@ -5,13 +5,136 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { acceptPlan, activeWorkset, finishTask, generatorHandoff, newTask, recordCompletedWorkset, recordVerification, validateWorksetChecks, type DecompositionPlan, type TaskState, type Verification } from "../godot-pat/controller.ts";
+import { acceptPlan, activeWorkset, authorizeProposal, finishTask, generatorHandoff, migrateTaskState, newTask, recordCompletedWorkset, recordVerification, validatePlanScope, validateWorksetChecks, type DecompositionPlan, type TaskState, type Verification } from "../godot-pat/controller.ts";
 import { classifyGodotDiagnostics, parseGodotErrors, verifyProject } from "../godot-pat/godot.ts";
 import godotPat from "../godot-pat/index.ts";
 import { parsePlannerOutput, plannerInput } from "../godot-pat/planner.ts";
 import { inspectProject, inspectScene } from "../godot-pat/project.ts";
+import { parsePlanScopeDecisions, parseScopeDecision } from "../godot-pat/scope.ts";
 
 const godot = path.resolve(import.meta.dirname, "../../Godot_Engine/Godot_v4.6.2-stable_win64_console.exe");
+
+test("scope suggestions cannot create work or reopen a completed requirement", () => {
+	const state = newTask("Build a menu", [{ id: "R1", text: "A working menu", doneWhen: "Menu starts the game" }]);
+	const proposal = { basis: "user_requirement" as const, sourceId: "R1", expected: "Menu starts the game",
+		observed: "The menu starts, but another color might look nicer", evidence: "Current menu works", proposedGoal: "Change the menu color" };
+	const optional = authorizeProposal(state, proposal, "optional", "The menu requirement is met.");
+	assert.deepEqual(activeWorkset(optional), activeWorkset(state));
+	assert.equal(optional.suggestions?.length, 1);
+	const uncertain = authorizeProposal(optional, proposal, "uncertain", "No failure is demonstrated.");
+	assert.deepEqual(activeWorkset(uncertain), activeWorkset(state));
+	const required = authorizeProposal(state, { ...proposal, observed: "The menu button does not start the game", proposedGoal: "Connect the start button" },
+		"required", "R1 is not met.");
+	assert.equal(activeWorkset(required).items.at(-1)?.id, "W1");
+	assert.equal(required.workItems.at(-1)?.sourceId, "R1");
+	const closed = { ...state, workItems: state.workItems.map((item) => ({ ...item, status: "closed" as const })) };
+	assert.throws(() => authorizeProposal(closed, proposal, "required", "Try again"), /cannot be reopened/);
+	assert.equal(parseScopeDecision('{"decision":"optional","reason":"Already works"}').decision, "optional");
+});
+
+test("review gaps need a scope decision and preserve uncertain manual review", () => {
+	const reviewed = recordVerification(newTask("Build a menu", [{ id: "R1", text: "Start button works" }]),
+		{ status: "pass", stage: "runtime", errors: [], score: 10, fingerprint: "current" });
+	const check = { id: "R1", status: "missing" as const, expected: "Start button works", observed: "Button does nothing", evidence: "No start handler" };
+	assert.throws(() => finishTask(reviewed, [check], "current", {}), /Missing scope decision/);
+	const optional = finishTask(reviewed, [check], "current", { R1: "optional" });
+	assert.equal(optional.phase, "done");
+	assert.equal((optional.completionEvidence?.[0] as { status: string })?.status, "implemented");
+	const uncertain = finishTask(reviewed, [check], "current", { R1: "uncertain" });
+	assert.equal(uncertain.phase, "stopped");
+	assert.equal((uncertain.completionEvidence?.[0] as { status: string })?.status, "missing");
+	assert.match(uncertain.plannerError ?? "", /manual review/);
+	const required = finishTask(reviewed, [check], "current", { R1: "required" });
+	assert.equal(required.phase, "generate");
+	assert.deepEqual(required.pendingRequirements, ["R1"]);
+	assert.equal(required.workItems.at(-1)?.source, "requirement_gap");
+});
+
+test("Planner children must cite authorized parents and optional children are rejected", () => {
+	const failure = recordVerification(newTask("Build a menu"), { status: "fail", stage: "import",
+		errors: [{ stage: "import", message: "Scene parse error" }], score: 0, fingerprint: "a" });
+	const plan: DecompositionPlan = { decision: "revise", reason: "Fix parse error", objective: "Import scene",
+		subtasks: [{ id: "S1", parentWorkItemId: "E1-1", problem: "Parse error", goal: "Fix scene" }] };
+	assert.doesNotThrow(() => validatePlanScope(failure, plan));
+	assert.throws(() => validatePlanScope(failure, { ...plan, subtasks: [{ ...plan.subtasks![0], parentWorkItemId: "R1" }] }), /authorized work item/);
+	const decisions = parsePlanScopeDecisions('{"decisions":[{"id":"S1","decision":"optional","reason":"Decorative change"}]}', ["S1"]);
+	assert.equal(decisions.S1, "optional");
+	assert.throws(() => parsePlanScopeDecisions('{"decisions":[]}', ["S1"]), /every subtask/);
+	const initial = newTask("Build two features", [{ id: "R1", text: "Menu" }, { id: "R2", text: "Movement" }]);
+	const decomposed = acceptPlan({ ...initial, phase: "plan", lastFailureWorkIds: ["R1"], carryWorkIds: ["R2"] },
+		{ decision: "revise", reason: "Menu needs parts", objective: "Build menu", subtasks: [{ id: "S1", parentWorkItemId: "R1", problem: "No menu", goal: "Create menu" }] });
+	assert.deepEqual(activeWorkset(decomposed).items.map((item) => item.id), ["S1", "R2"], "decomposing one item must keep the rest of the workset");
+});
+
+test("older session plans without a traceable parent do not become completed work", () => {
+	const migrated = migrateTaskState({ goal: "Build a menu", schemaVersion: 4, phase: "generate", plan: [{ id: "S1", problem: "Old task", goal: "Unknown origin" }] });
+	assert.equal(migrated.schemaVersion, 5);
+	assert.equal(migrated.phase, "stopped");
+	assert.match(migrated.plannerError ?? "", /no traceable work source/);
+});
+
+test("Generator proposals need a scope verdict before joining the workset", async () => {
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const tools = new Map<string, unknown>();
+	const entries: TaskState[] = [];
+	const saved = { ...newTask("Build a menu", [{ id: "R1", text: "Start button works" }]), projectPath: os.tmpdir() };
+	godotPat({
+		on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(name, handler); },
+		registerTool(tool: { name: string }) { tools.set(tool.name, tool); }, registerCommand() {},
+		appendEntry(_name: string, data: unknown) { entries.push(data as TaskState); },
+	} as unknown as ExtensionAPI);
+	const ctx = { cwd: os.tmpdir(), model: { provider: "test", id: "mock" }, thinkingLevel: "off",
+		modelRegistry: { streamSimple(_model: unknown, request: { messages: { content: { text: string }[] }[] }) {
+			const proposal = JSON.parse(request.messages[0].content[0].text).proposal;
+			const decision = proposal.proposedGoal.includes("color") ? "optional" : "required";
+			return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ decision, reason: "Reviewed against R1" }) }] }) };
+		} },
+		sessionManager: { getBranch: () => [{ type: "custom", customType: "godot-pat-state", data: saved }] } };
+	await handlers.get("session_start")?.({}, ctx);
+	type TestTool = { execute: (id: string, params: object, signal?: undefined, update?: undefined, context?: object) => Promise<{ content: { text: string }[] }> };
+	const propose = tools.get("godot_propose_work") as TestTool;
+	const base = { basis: "user_requirement", sourceId: "R1", expected: "Start button works", observed: "Button works", evidence: "Click opens game" };
+	const optional = await propose.execute("optional", { ...base, proposedGoal: "Change color" }, undefined, undefined, ctx);
+	assert.match(optional.content[0].text, /suggestion only/);
+	assert.equal(entries.at(-1)?.extraWorkIds?.length ?? 0, 0);
+	await propose.execute("required", { ...base, observed: "Button does nothing", proposedGoal: "Connect start button" }, undefined, undefined, ctx);
+	assert.deepEqual(entries.at(-1)?.extraWorkIds, ["W1"]);
+	assert.equal(activeWorkset(entries.at(-1)!).items.at(-1)?.goal, "Connect start button");
+});
+
+test("Planner cannot turn an import error into optional redesign work", async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-plan-scope-"));
+	try {
+		await fs.writeFile(path.join(root, "project.godot"), 'config_version=5\n\n[application]\nrun/main_scene="res://Main.tscn"\n');
+		const saved = { ...recordVerification(newTask("Build a game"), { status: "fail" as const, stage: "import",
+			errors: [{ stage: "import", message: "Main.tscn parse error" }], score: 0, fingerprint: "before" }), projectPath: root };
+		const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+		const tools = new Map<string, unknown>();
+		const entries: TaskState[] = [];
+		godotPat({ on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(name, handler); },
+			registerTool(tool: { name: string }) { tools.set(tool.name, tool); }, registerCommand() {},
+			appendEntry(_name: string, data: unknown) { entries.push(data as TaskState); } } as unknown as ExtensionAPI);
+		const ctx = { cwd: root, model: { provider: "test", id: "mock" }, thinkingLevel: "off",
+			modelRegistry: { streamSimple(_model: unknown, request: { systemPrompt: string }) {
+				const result = request.systemPrompt.includes("plan scope reviewer")
+					? { decisions: [{ id: "S1", decision: "required", reason: "Fixes the parse error" }, { id: "S2", decision: "optional", reason: "Menu redesign is unrelated" }] }
+					: { decision: "revise", reason: "Fix import", objective: "Import project", subtasks: [
+						{ id: "S1", parentWorkItemId: "E1-1", problem: "Parse error", goal: "Fix Main.tscn" },
+						{ id: "S2", parentWorkItemId: "E1-1", problem: "Menu colors", goal: "Redesign menu" },
+					] };
+				return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: JSON.stringify(result) }] }) };
+			} }, sessionManager: { getBranch: () => [{ type: "custom", customType: "godot-pat-state", data: saved }] } };
+		await handlers.get("session_start")?.({}, ctx);
+		type TestTool = { execute: (id: string, params: object, signal?: undefined, update?: undefined, context?: object) => Promise<{ content: { text: string }[] }> };
+		const result = await (tools.get("godot_verify") as TestTool).execute("resume", {}, undefined, undefined, ctx);
+		assert.equal(entries.at(-1)?.phase, "stopped");
+		assert.match(result.content[0].text, /unsupported work/);
+		assert.equal(entries.at(-1)?.plan.length, 0);
+	} finally {
+		if (!root.startsWith(os.tmpdir() + path.sep)) throw new Error("Refusing to remove a non-temporary project directory.");
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
 
 test("project selection creates game/ only for an unspecified output path", async () => {
 	const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "ltgd-project-selection-"));
@@ -27,7 +150,8 @@ test("project selection creates game/ only for an unspecified output path", asyn
 		} as unknown as ExtensionAPI);
 		const ctx = { cwd, sessionManager: { getBranch: () => [] } };
 		await handlers.get("session_start")?.({}, ctx);
-		assert.equal(handlers.has("tool_call"), false, "loading LTGD must not block ordinary Pi tools");
+		assert.equal(handlers.has("tool_call"), true, "LTGD installs a phase-aware tool gate");
+		assert.equal(await handlers.get("tool_call")?.({ toolName: "bash", input: { command: "pwd" } }, ctx), undefined, "unrelated Pi tools remain available before a game is selected");
 		assert.equal(handlers.has("agent_end"), false, "unrelated turns must not trigger automatic Godot verification");
 		const unrelated = await handlers.get("before_agent_start")?.({ prompt: "List my notes", systemPrompt: "BASE" }, ctx) as { systemPrompt: string };
 		assert.match(unrelated.systemPrompt, /For other tasks, leave LTGD tools unused/);
@@ -276,11 +400,15 @@ test("a malformed isolated Planner response gets one bounded retry", async () =>
 		} as unknown as ExtensionAPI);
 		const ctx = {
 			cwd: root, model: { provider: "test", id: "mock" }, thinkingLevel: "off",
-			modelRegistry: { streamSimple() {
+			modelRegistry: { streamSimple(_model: unknown, request: { systemPrompt: string }) {
 				calls++;
-				return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: calls === 1 ? "invalid" : JSON.stringify({
-					decision: "revise", reason: "Scene is missing", objective: "Create scene", subtasks: [{ id: "S1", problem: "Scene is missing", goal: "Create scene", suggested_files: ["Main.tscn"] }],
-				}) }] }) };
+				const output = request.systemPrompt.includes("scope reviewer")
+					? { decisions: [{ id: "S1", decision: "required", reason: "The scene is missing" }] }
+					: calls === 1 ? "invalid" : {
+						decision: "revise", reason: "Scene is missing", objective: "Create scene",
+						subtasks: [{ id: "S1", parentWorkItemId: "E1-1", problem: "Scene is missing", goal: "Create scene", suggested_files: ["Main.tscn"] }],
+					};
+				return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output) }] }) };
 			} },
 			sessionManager: { getBranch: () => [{ type: "custom", customType: "godot-pat-state", data: saved }] },
 		};
@@ -289,7 +417,7 @@ test("a malformed isolated Planner response gets one bounded retry", async () =>
 		assert.equal(calls, 0, "unrelated requests must not resume a pending Planner automatically");
 		type TestTool = { execute: (id: string, params: object, signal?: undefined, update?: undefined, context?: object) => Promise<{ content: { text: string }[] }> };
 		const resumed = await (tools.get("godot_verify") as TestTool).execute("resume-plan", {}, undefined, undefined, ctx);
-		assert.equal(calls, 2);
+		assert.equal(calls, 3);
 		assert.equal(entries.at(-1)?.phase, "generate");
 		assert.match(resumed.content[0].text, /Generator plan/);
 	} finally {
@@ -346,11 +474,6 @@ test("failed verification calls a short-context Planner and hands its whole plan
 		let plannerCalls = 0;
 		let plannerRequest = "";
 		const initial = { ...newTask("Build a complete game"), projectPath: root };
-		const decomposition: DecompositionPlan = {
-			decision: "revise", reason: "Main scene is missing",
-			objective: "Make the game boot and navigate",
-			subtasks: [{ id: "S1", problem: "Main scene is missing", goal: "Create main scene", suggested_files: ["Main.tscn"] }],
-		};
 		godotPat({
 			on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(name, handler); },
 			registerTool(tool: { name: string }) { tools.set(tool.name, tool); },
@@ -359,10 +482,16 @@ test("failed verification calls a short-context Planner and hands its whole plan
 		} as unknown as ExtensionAPI);
 		const ctx = {
 			cwd: root, model: { provider: "test", id: "mock" }, thinkingLevel: "off",
-			modelRegistry: { streamSimple(_model: unknown, request: { messages: { content: { text: string }[] }[] }, options: { reasoning?: string }) {
+			modelRegistry: { streamSimple(_model: unknown, request: { systemPrompt: string; messages: { content: { text: string }[] }[] }, options: { reasoning?: string }) {
+				if (request.systemPrompt.includes("scope reviewer")) return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: request.systemPrompt.includes("plan scope")
+					? JSON.stringify({ decisions: [{ id: "S1", decision: "required", reason: "The scene error needs repair" }] })
+					: JSON.stringify({ decision: "required", reason: "The original requirement is missing" }) }] }) };
 				plannerCalls++;
 				plannerRequest = request.messages[0].content[0].text;
 				assert.equal(options.reasoning, undefined);
+				const parent = JSON.parse(plannerRequest).authorized_work[0].id;
+				const decomposition: DecompositionPlan = { decision: "revise", reason: "Main scene is missing", objective: "Make the game boot and navigate",
+					subtasks: [{ id: "S1", parentWorkItemId: parent, problem: "Main scene is missing", goal: "Create main scene", suggested_files: ["Main.tscn"] }] };
 				return { result: async () => ({ stopReason: "stop", content: [{ type: "text", text: JSON.stringify(decomposition) }] }) };
 			} },
 			sessionManager: { getBranch: () => [{ type: "custom", customType: "godot-pat-state", data: initial }] },
@@ -378,14 +507,14 @@ test("failed verification calls a short-context Planner and hands its whole plan
 		const result = await tool.execute("verify-fail", { workset_checks: [{ id: "R1", status: "completed", evidence: "Game files created" }] }, undefined, undefined, ctx);
 		assert.equal(plannerCalls, 1);
 		assert.equal("usage" in result, false);
-		assert.deepEqual(Object.keys(JSON.parse(plannerRequest)), ["original_requirement", "project_overview", "latest_failure", "current_code", "code_unavailable", "completed_subtasks"]);
+		assert.deepEqual(Object.keys(JSON.parse(plannerRequest)), ["original_requirement", "authorized_work", "project_overview", "latest_failure", "current_code", "code_unavailable", "completed_subtasks"]);
 		assert.match(result.content[0].text, /"problem":"Main scene is missing"/);
 		assert.equal(entries.at(-1)?.phase, "generate");
 		assert.equal(tools.has("godot_plan"), false);
 		assert.equal(tools.has("godot_subtask_done"), false);
 		const system = { role: "system", content: "BASE", timestamp: Date.now() };
 		const phase = await handlers.get("context_with_system")?.({ messages: [system] }, ctx) as { messages: { sections: Record<string, string> }[] };
-		assert.match(phase.messages[0].sections["ltgd-current-state"], /Current planner workset: S1: Create main scene/);
+		assert.match(phase.messages[0].sections["ltgd-current-state"], /Authorized planner workset: S1: Create main scene/);
 		assert.doesNotMatch(phase.messages[0].sections["ltgd-current-state"], /"problem"/);
 		await assert.rejects(() => tool.execute("verify-no-report", {}, undefined, undefined, ctx), /workset_checks/);
 		const planUnresolved = await tool.execute("verify-plan-incomplete", { workset_checks: [{ id: "S1", status: "unresolved", evidence: "Main scene syntax still fails" }] }, undefined, undefined, ctx);
@@ -404,6 +533,9 @@ test("failed verification calls a short-context Planner and hands its whole plan
 		assert.match(pass.content[0].text, /Godot PASS/);
 		assert.equal(plannerCalls, 2);
 		assert.equal(entries.at(-1)?.phase, "review");
+		const blockedShell = await handlers.get("tool_call")?.({ toolName: "bash", input: { command: "echo changed > Main.tscn" } }, ctx) as { block: boolean; reason: string };
+		assert.equal(blockedShell.block, true, "shell commands can modify files and must be blocked during review");
+		assert.equal(await handlers.get("tool_call")?.({ toolName: "read", input: { path: "Main.tscn" } }, ctx), undefined);
 		assert.deepEqual(entries.at(-1)?.solved.map((item) => item.id), ["S1"]);
 		const reviewPhase = await handlers.get("context_with_system")?.({ messages: phase.messages }, ctx) as { messages: { sections: Record<string, string> }[] };
 		assert.match(reviewPhase.messages[0].sections["ltgd-current-state"], /Phase: review/);
@@ -416,7 +548,7 @@ test("failed verification calls a short-context Planner and hands its whole plan
 		assert.match(cached.content[0].text, /reused the last successful verification/);
 		assert.equal(entries.at(-1)?.attempts, savedAttempts);
 		const finish = tools.get("godot_finish") as TestTool;
-		const missing = await finish.execute("review-missing", { checks: [{ id: "R1", status: "missing", evidence: "A requested interaction is absent" }] }, undefined, undefined, ctx);
+		const missing = await finish.execute("review-missing", { checks: [{ id: "R1", status: "missing", expected: "Requested interaction exists", observed: "It is absent", evidence: "A requested interaction is absent" }] }, undefined, undefined, ctx);
 		assert.match(missing.content[0].text, /Review found missing/);
 		assert.equal(entries.at(-1)?.phase, "generate");
 		const noChange = await tool.execute("verify-before-fix", { workset_checks: [{ id: "R1", status: "completed", evidence: "No changes yet" }] }, undefined, undefined, ctx);
