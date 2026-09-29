@@ -98,6 +98,16 @@ export function parseGodotErrors(output: string, stage: string): Failure[] {
 	return collector.finish();
 }
 
+export function classifyGodotDiagnostics(errors: Failure[]): { blocking: Failure[]; warnings: Failure[] } {
+	const blocking: Failure[] = [];
+	const warnings: Failure[] = [];
+	for (const error of errors) {
+		if (/^ERROR:\s+\d+ resources? still in use at exit\b/i.test(error.message)) warnings.push(error);
+		else blocking.push(error);
+	}
+	return { blocking, warnings };
+}
+
 function exitFailure(stage: string, result: CommandResult): Failure {
 	const detail = result.outputTail.trim();
 	return { stage, message: `Godot exited with code ${result.exitCode}.${detail ? ` Final output (up to 8000 characters):\n${detail}` : ""}` };
@@ -119,20 +129,23 @@ export async function verifyProject(options: VerifyOptions): Promise<Verificatio
 	if (editor.error || editor.timedOut) {
 		return { ...base, status: "infrastructure", stage: "import", errors: [{ stage: "import", message: editor.error ?? "Godot import timed out." }] };
 	}
-	const importErrors = editor.errors;
-	if (editor.exitCode !== 0 || importErrors.length) {
-		return { ...base, stage: "import", errors: importErrors.length ? importErrors : [exitFailure("import", editor)] };
+	const importDiagnostics = classifyGodotDiagnostics(editor.errors);
+	if (editor.exitCode !== 0 || importDiagnostics.blocking.length) {
+		return { ...base, stage: "import", errors: importDiagnostics.blocking.length ? importDiagnostics.blocking : [exitFailure("import", editor)], warnings: importDiagnostics.warnings };
 	}
 	base.score = 5;
+	base.warnings = importDiagnostics.warnings;
 	if (options.runGame !== false) {
 		const game = await runCommand(options.godot, ["--headless", "--path", options.project, "--quit-after", "60"], 25_000, "runtime", options.signal);
 		if (game.error || game.timedOut) {
 			return { ...base, status: "infrastructure", stage: "runtime", errors: [{ stage: "runtime", message: game.error ?? "Godot runtime timed out." }] };
 		}
-		const runtimeErrors = game.errors;
-		if (game.exitCode !== 0 || runtimeErrors.length) {
-			return { ...base, stage: "runtime", errors: runtimeErrors.length ? runtimeErrors : [exitFailure("runtime", game)] };
+		const runtimeDiagnostics = classifyGodotDiagnostics(game.errors);
+		const warnings = [...importDiagnostics.warnings, ...runtimeDiagnostics.warnings];
+		if (game.exitCode !== 0 || runtimeDiagnostics.blocking.length) {
+			return { ...base, stage: "runtime", errors: runtimeDiagnostics.blocking.length ? runtimeDiagnostics.blocking : [exitFailure("runtime", game)], warnings };
 		}
+		base.warnings = warnings;
 	}
 	return { ...base, status: "pass", stage: options.runGame === false ? "import" : "runtime", score: options.runGame === false ? 5 : 10 };
 }

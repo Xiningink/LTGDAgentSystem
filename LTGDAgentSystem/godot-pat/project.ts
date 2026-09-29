@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
 const SKIP = new Set([".git", ".godot", ".pi", ".pi-godot", "node_modules"]);
-const SOURCE = new Set([".gd", ".tscn", ".tres", ".gdshader"]);
 
 export interface ProjectIndex {
 	project: string;
@@ -33,10 +33,9 @@ export async function inspectProject(root: string): Promise<ProjectIndex> {
 	const files = await listProjectFiles(root);
 	const hash = createHash("sha256");
 	for (const name of files) {
-		if (name === "project.godot" || SOURCE.has(path.extname(name))) {
-			hash.update(name);
-			hash.update(await fs.readFile(path.join(root, name)));
-		}
+		hash.update(name);
+		hash.update("\0");
+		for await (const chunk of createReadStream(path.join(root, name))) hash.update(chunk);
 	}
 	const config = files.includes("project.godot") ? await fs.readFile(path.join(root, "project.godot"), "utf8") : "";
 	const mainScene = config.match(/^run\/main_scene\s*=\s*"([^"]+)"/m)?.[1];

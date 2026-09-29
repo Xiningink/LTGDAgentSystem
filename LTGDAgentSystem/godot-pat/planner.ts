@@ -3,9 +3,9 @@ import path from "node:path";
 import type { DecompositionPlan, Failure, TaskState } from "./controller.ts";
 import type { ProjectIndex } from "./project.ts";
 
-export const PLANNER_SYSTEM_PROMPT = `You are the Planner for a Godot game development task. The Generator's latest project verification failed. Analyze the supplied original requirement, all distinct errors from that verification, and any current code excerpts. You cannot run tools or edit files.
+export const PLANNER_SYSTEM_PROMPT = `You are the Planner for a Godot game development task. The Generator's latest Godot verification failed. Analyze the original requirement, all distinct errors from this verification, and any current code excerpts. You cannot run tools or edit files. Every subtask must address an observed error from this latest formal verification; distinguish a supported diagnosis from a hypothesis. Preserve the original requirement and do not invent optional improvements.
 
-Return one JSON object with an objective and an ordered, nonempty subtasks array. Each subtask has an id, problem, and goal; suggested_files is an optional array of file hints. Describe the observed issue and the desired result. Distinguish evidence from hypotheses. Keep the plan focused on the current failure while preserving the original requirement. File hints do not restrict the Generator's edits. Do not prescribe exact patches or add checks or dependencies. Return JSON only.`;
+Return one JSON object. If project files need revision, return {"decision":"revise","reason":"...","objective":"...","subtasks":[{"id":"S1","problem":"...","goal":"...","suggested_files":["res://...godot"]}]}. Subtasks must be ordered and nonempty; suggested_files is optional and only a hint. If the evidence does not support a project-code change, return {"decision":"cannot_resolve_in_project","reason":"...","evidence":["..."]} and no subtasks. Distinguish observed evidence from hypotheses. Do not prescribe exact patches or add checks or dependencies. Return JSON only.`;
 
 interface CodeExcerpt {
 	file: string;
@@ -90,7 +90,7 @@ export async function plannerInput(state: TaskState, project: ProjectIndex): Pro
 			total_files: project.resources,
 			error_files: [...new Set(failure.errors.map((error) => error.file).filter((file): file is string => !!file))],
 		},
-		latest_failure: { stage: failure.stage, errors: failure.errors },
+		latest_failure: { stage: failure.stage, errors: failure.errors, unchanged_attempts: state.unchangedFailureStreak ?? 0 },
 		current_code: excerpts,
 		code_unavailable: unavailable,
 		completed_subtasks: state.solved.map(({ id, evidence }) => ({ id, evidence })),

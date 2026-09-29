@@ -12,6 +12,7 @@ export interface Verification {
 	status: VerificationStatus;
 	stage: string;
 	errors: Failure[];
+	warnings?: Failure[];
 	score: number;
 	fingerprint: string;
 }
@@ -23,18 +24,48 @@ export interface Subtask {
 	suggested_files?: string[];
 }
 
+export interface Requirement {
+	id: string;
+	text: string;
+}
+
+export interface RequirementCheck {
+	id: string;
+	status: "implemented" | "needs_playtest" | "missing";
+	evidence: string;
+}
+
+export type WorksetSource = "user" | "planner" | "review";
+
+export interface ActiveWorkset {
+	source: WorksetSource;
+	items: { id: string; goal: string }[];
+}
+
+export interface WorksetCheck {
+	id: string;
+	status: "completed" | "unresolved";
+	evidence: string;
+}
+
 export interface DecompositionPlan {
-	objective: string;
-	subtasks: Subtask[];
+	decision: "revise" | "cannot_resolve_in_project";
+	reason: string;
+	objective?: string;
+	subtasks?: Subtask[];
+	evidence?: string[];
 }
 
 export interface TaskState {
-	schemaVersion: 3;
+	schemaVersion: 4;
 	goal: string;
+	requirements: Requirement[];
+	pendingRequirements?: string[];
 	projectPath?: string;
 	phase: Phase;
 	attempts: number;
 	lastFailure?: string;
+	unchangedFailureStreak?: number;
 	lastFingerprint?: string;
 	lastVerification?: Verification;
 	plan: Subtask[];
@@ -43,29 +74,42 @@ export interface TaskState {
 	integrationChecks?: string[];
 	/** Generator-reported completed work; older records may contain verified subtask evidence. */
 	solved: { id: string; evidence: string; fingerprint: string }[];
-	completionEvidence?: string[];
+	completionEvidence?: RequirementCheck[] | string[];
 	plannerError?: string;
 }
 
-export function newTask(goal: string): TaskState {
-	return { schemaVersion: 3, goal, phase: "generate", attempts: 0, plan: [], solved: [] };
+export function newTask(goal: string, requirements?: Requirement[]): TaskState {
+	const selected = requirements?.length ? requirements : [{ id: "R1", text: goal }];
+	const seen = new Set<string>();
+	for (const item of selected) {
+		if (!item || typeof item !== "object") throw new Error("Each requirement must be an object.");
+		nonempty(item.id, "Requirement ID");
+		nonempty(item.text, `Requirement ${item.id}`);
+		if (seen.has(item.id)) throw new Error("Requirement IDs must be unique.");
+		seen.add(item.id);
+	}
+	return { schemaVersion: 4, goal, requirements: selected, phase: "generate", attempts: 0, plan: [], solved: [] };
 }
 
 export function recordVerification(state: TaskState, result: Verification): TaskState {
 	if (result.status === "infrastructure") return { ...state, lastVerification: result };
 	const attempts = state.attempts + 1;
 	if (result.status === "pass") {
-		return { ...state, phase: "review", attempts, lastVerification: result, lastFingerprint: result.fingerprint };
+		return { ...state, phase: "review", attempts, lastVerification: result, lastFingerprint: result.fingerprint, lastFailure: undefined, unchangedFailureStreak: 0 };
 	}
 	const signature = createHash("sha256").update(JSON.stringify(result.errors.map((error) => [error.stage, error.file, error.line, error.message]))).digest("hex");
-	const phase: Phase = state.lastFailure === signature && state.lastFingerprint === result.fingerprint ? "stopped" : "plan";
+	const sameFailure = state.lastFailure === signature;
+	const unchangedFailureStreak = sameFailure ? (state.unchangedFailureStreak ?? 0) + 1 : 0;
+	const phase: Phase = sameFailure && (state.lastFingerprint === result.fingerprint || unchangedFailureStreak >= 2) ? "stopped" : "plan";
 	return {
 		...state,
 		phase,
 		attempts,
 		lastFailure: signature,
+		unchangedFailureStreak,
 		lastFingerprint: result.fingerprint,
 		lastVerification: result,
+		plannerError: phase === "stopped" ? "The same Godot errors persisted after repeated revisions." : undefined,
 	};
 }
 
@@ -73,9 +117,58 @@ function nonempty(text: unknown, label: string): asserts text is string {
 	if (typeof text !== "string" || !text.trim()) throw new Error(`${label} must be a nonempty string.`);
 }
 
+export function activeWorkset(state: TaskState): ActiveWorkset {
+	if (state.phase !== "generate") throw new Error("An active workset is available only during generation.");
+	if (state.pendingRequirements?.length) {
+		return {
+			source: "review",
+			items: state.pendingRequirements.map((id) => {
+				const requirement = state.requirements.find((item) => item.id === id);
+				if (!requirement) throw new Error(`Unknown pending requirement: ${id}.`);
+				return { id, goal: requirement.text };
+			}),
+		};
+	}
+	if (state.plan.length) return { source: "planner", items: state.plan.map(({ id, goal }) => ({ id, goal })) };
+	return { source: "user", items: state.requirements.map(({ id, text }) => ({ id, goal: text })) };
+}
+
+export function validateWorksetChecks(state: TaskState, checks: WorksetCheck[] | undefined, reopenRequirementId?: string): { workset: ActiveWorkset; unresolved: WorksetCheck[] } {
+	let workset: ActiveWorkset;
+	if (reopenRequirementId !== undefined) {
+		if (state.phase !== "review") throw new Error("Reopen a requirement only after a successful verification.");
+		const requirement = state.requirements.find((item) => item.id === reopenRequirementId);
+		if (!requirement) throw new Error(`Unknown original requirement: ${reopenRequirementId}.`);
+		workset = { source: "review", items: [{ id: requirement.id, goal: requirement.text }] };
+	} else {
+		workset = activeWorkset(state);
+	}
+	if (!Array.isArray(checks)) throw new Error(`Report every ${workset.source} workset item in workset_checks before verification.`);
+	const expected = new Set(workset.items.map((item) => item.id));
+	const seen = new Set<string>();
+	for (const check of checks) {
+		if (!check || typeof check !== "object") throw new Error("Each workset check must be an object.");
+		if (!expected.has(check.id)) throw new Error(`Unknown active workset ID: ${check.id}.`);
+		if (seen.has(check.id)) throw new Error(`Duplicate workset ID: ${check.id}.`);
+		if (check.status !== "completed" && check.status !== "unresolved") throw new Error(`Invalid workset status for ${check.id}.`);
+		nonempty(check.evidence, `Evidence for ${check.id}`);
+		seen.add(check.id);
+	}
+	if (seen.size !== expected.size) throw new Error(`Report every ${workset.source} workset item exactly once. Missing: ${workset.items.filter((item) => !seen.has(item.id)).map((item) => item.id).join(", ")}.`);
+	return { workset, unresolved: checks.filter((check) => check.status === "unresolved") };
+}
+
 export function acceptPlan(state: TaskState, plan: DecompositionPlan): TaskState {
 	if (state.phase !== "plan") throw new Error("Planner is available only in the plan phase.");
 	if (!plan || typeof plan !== "object" || Array.isArray(plan)) throw new Error("Supply a structured plan.");
+	if (plan.decision !== "revise" && plan.decision !== "cannot_resolve_in_project") throw new Error("Planner decision must be revise or cannot_resolve_in_project.");
+	nonempty(plan.reason, "Plan reason");
+	if (plan.decision === "cannot_resolve_in_project") {
+		if (plan.subtasks !== undefined && (!Array.isArray(plan.subtasks) || plan.subtasks.length)) throw new Error("A no-change decision cannot contain subtasks.");
+		if (!Array.isArray(plan.evidence) || !plan.evidence.length) throw new Error("A no-change decision requires verification evidence.");
+		plan.evidence.forEach((item, index) => nonempty(item, `Planner evidence[${index}]`));
+		return { ...state, phase: "stopped", plan: [], planObjective: undefined, plannerError: `${plan.reason}${plan.evidence?.length ? ` Evidence: ${plan.evidence.join("; ")}` : ""}` };
+	}
 	nonempty(plan.objective, "Plan objective");
 	const subtasks = plan.subtasks;
 	if (!Array.isArray(subtasks) || !subtasks.length) throw new Error("Plan must contain subtasks.");
@@ -91,42 +184,42 @@ export function acceptPlan(state: TaskState, plan: DecompositionPlan): TaskState
 		}
 		seen.add(task.id);
 	}
-	return { ...state, phase: "generate", plan: subtasks, planObjective: plan.objective, integrationChecks: undefined, solved: [], completionEvidence: undefined, plannerError: undefined };
+	return { ...state, phase: "generate", plan: subtasks, planObjective: plan.objective, pendingRequirements: undefined, integrationChecks: undefined, solved: [], completionEvidence: undefined, plannerError: undefined };
 }
 
 export function generatorHandoff(state: TaskState): string {
 	if (state.phase !== "generate" || !state.plan.length) return "";
+	const workset = activeWorkset(state);
 	return `Generator plan: ${JSON.stringify({
 		objective: state.planObjective ?? state.goal,
 		subtasks: state.plan,
-	})}\nImplement the whole plan, then call godot_verify once. Suggested files are hints, not a restriction on edits. Completed subtask IDs and brief evidence may be included in that verification call.`;
+	})}\nCurrent ${workset.source} workset: ${workset.items.map((item) => `${item.id}: ${item.goal}`).join("; ")}. Complete the whole workset, then call godot_verify once with workset_checks for every ID. If an item is unresolved, continue only that item. Suggested files are hints, not a restriction on edits; do not add optional objectives.`;
 }
 
-export function recordCompletedSubtasks(state: TaskState, completed: { id: string; evidence: string }[], fingerprint: string): TaskState {
-	if (state.phase !== "generate") throw new Error("Report completed work during generation.");
-	if (!Array.isArray(completed) || completed.length > state.plan.length) throw new Error("Report only planned subtasks.");
-	const ids = new Set<string>();
-	const solved = [...state.solved];
-	for (const item of completed) {
-		nonempty(item.id, "Completed subtask ID");
-		nonempty(item.evidence, `Evidence for ${item.id}`);
-		if (ids.has(item.id) || !state.plan.some((task) => task.id === item.id)) throw new Error("Completed subtask IDs must be unique and belong to the current plan.");
-		ids.add(item.id);
-		const record = { id: item.id, evidence: item.evidence, fingerprint };
-		const old = solved.findIndex((entry) => entry.id === item.id);
-		if (old < 0) solved.push(record);
-		else solved[old] = record;
-	}
-	return { ...state, solved };
+export function recordCompletedWorkset(state: TaskState, checks: WorksetCheck[], fingerprint: string): TaskState {
+	const { workset, unresolved } = validateWorksetChecks(state, checks);
+	if (unresolved.length) throw new Error("Cannot record an incomplete workset as completed.");
+	if (workset.source !== "planner") return state;
+	return { ...state, solved: checks.map(({ id, evidence }) => ({ id, evidence, fingerprint })) };
 }
 
-export function finishTask(state: TaskState, evidence: string[], fingerprint: string): TaskState {
+export function finishTask(state: TaskState, checks: RequirementCheck[], fingerprint: string): TaskState {
 	if (state.phase !== "review") throw new Error("Finish only after a successful full-project review.");
 	if (state.lastVerification?.status !== "pass" || state.lastVerification.fingerprint !== fingerprint) {
 		throw new Error("Verify the current project files before finishing.");
 	}
-	if (!Array.isArray(evidence) || !evidence.length) throw new Error("Completion evidence must contain at least one requirement check.");
-	evidence.forEach((item, index) => nonempty(item, `Completion evidence[${index}]`));
-	return { ...state, phase: "done", completionEvidence: evidence };
+	if (!Array.isArray(checks) || checks.length !== state.requirements.length) throw new Error("Review every original requirement exactly once.");
+	const expected = new Set(state.requirements.map((item) => item.id));
+	const seen = new Set<string>();
+	for (const check of checks) {
+		if (!check || typeof check !== "object") throw new Error("Each requirement check must be an object.");
+		if (!expected.has(check.id) || seen.has(check.id)) throw new Error("Requirement checks must use each original ID exactly once.");
+		if (!["implemented", "needs_playtest", "missing"].includes(check.status)) throw new Error(`Invalid status for ${check.id}.`);
+		nonempty(check.evidence, `Evidence for ${check.id}`);
+		seen.add(check.id);
+	}
+	const missing = checks.filter((check) => check.status === "missing").map((check) => check.id);
+	if (missing.length) return { ...state, phase: "generate", plan: [], planObjective: undefined, solved: [], pendingRequirements: missing, completionEvidence: checks };
+	return { ...state, phase: "done", pendingRequirements: [], completionEvidence: checks };
 }
 import { createHash } from "node:crypto";
