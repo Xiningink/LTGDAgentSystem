@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Project,
     [Parameter(Mandatory = $true)][string]$Out,
-    [ValidateRange(1, 100000)][int]$Frames = 60,
+    [ValidateRange(1, 100000)][int]$Frames = 30,
     [string]$Scene,
     [string]$Scenario,
     [string[]]$GameArgs = @(),
@@ -29,30 +29,30 @@ $captureDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("ltgd-screensho
 New-Item -ItemType Directory -Path $captureDirectory | Out-Null
 
 try {
-    $moviePath = Join-Path $captureDirectory 'frame.png'
-    $godotArgs = @('--path', $projectPath, '--write-movie', $moviePath, '--quit-after', [string]$Frames, '--fixed-fps', '60', '--disable-vsync')
+    $capturePath = Join-Path $captureDirectory 'frame.png'
+    $captureScript = Join-Path $PSScriptRoot 'screenshot.gd'
+    $godotArgs = @(
+        '--path', $projectPath,
+        '--display-driver', 'windows',
+        '--rendering-driver', 'opengl3',
+        '--audio-driver', 'Dummy',
+        '--resolution', '1280x720',
+        '--script', $captureScript,
+        '--', '--out', $capturePath, '--frames', [string]$Frames
+    )
     if ($Scene) { $godotArgs += @('--scene', $Scene) }
-
-    $forwardedArgs = @()
-    if ($Scenario) { $forwardedArgs += @('--scenario', $Scenario) }
-    if ($GameArgs) { $forwardedArgs += $GameArgs }
-    if ($forwardedArgs.Count -gt 0) { $godotArgs += @('--') + $forwardedArgs }
+    if ($Scenario) { $godotArgs += @('--scenario', $Scenario) }
+    if ($GameArgs) { $godotArgs += $GameArgs }
 
     $godotOutput = @(& $godotPath @godotArgs 2>&1)
     $exitCode = $LASTEXITCODE
     $godotOutput | ForEach-Object { Write-Output $_ }
     if ($exitCode -ne 0) { throw "Godot exited with code $exitCode" }
     if ($godotOutput | Where-Object { $_ -match '^(SCRIPT ERROR:|ERROR:)' }) {
-        throw 'Godot reported an error while recording the screenshot.'
+        throw 'Godot reported an error while capturing the screenshot.'
     }
-
-    $lastFrame = Get-ChildItem -LiteralPath $captureDirectory -File |
-        Where-Object { $_.Name -match '^frame\d{8}\.png$' } |
-        Sort-Object Name |
-        Select-Object -Last 1
-    if (-not $lastFrame) { throw 'Godot produced no PNG frames.' }
-
-    Copy-Item -LiteralPath $lastFrame.FullName -Destination $outputPath -Force
+    if (-not (Test-Path -LiteralPath $capturePath -PathType Leaf)) { throw 'Godot produced no PNG screenshot.' }
+    Copy-Item -LiteralPath $capturePath -Destination $outputPath -Force
     Write-Output "Screenshot saved: $outputPath"
 }
 finally {
