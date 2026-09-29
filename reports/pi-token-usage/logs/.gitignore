@@ -1,0 +1,4 @@
+# 原始会话日志体积较大，不入库；汇总数字见上一层目录。
+# 生成方式：python ../export_pi_usage.py --all-logs
+*.jsonl
+*.md
