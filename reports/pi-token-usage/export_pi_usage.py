@@ -4,7 +4,7 @@
 Reads the Pi agent session JSONL files (default: the current session from
 $PI_SESSION_FILE, plus every other session under ~/.pi/agent/sessions) and
 writes a token-usage report, a per-call CSV, a readable transcript and a copy
-of the raw log.
+of the raw log under <out>/<session-id>/.
 
 Usage:
     python export_pi_usage.py [--session <path.jsonl>] [--out <dir>]
@@ -104,6 +104,9 @@ def analyse(path: Path) -> dict:
             info["invalid"] += 1
             continue
         if rtype == "session":
+            session_id = rec.get("id")
+            if isinstance(session_id, str) and re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+                info["id"] = session_id
             info["cwd"] = rec.get("cwd", "")
             info["start"] = parse_iso(rec.get("timestamp")) or info["start"]
             continue
@@ -454,11 +457,6 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    logs_dir = out_dir / "logs"
-    logs_dir.mkdir(exist_ok=True)
-
     primary = Path(args.session) if args.session else None
     if primary is None or not primary.is_file():
         found = session_files()
@@ -470,6 +468,9 @@ def main() -> int:
 
     all_infos = [analyse(p) for p in session_files()]
     info = next((i for i in all_infos if i["path"] == primary), analyse(primary))
+    out_dir = Path(args.out) / info["id"]
+    logs_dir = out_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     # usage report + json + csv
     (out_dir / "usage.md").write_text(usage_markdown(info), encoding="utf-8")
@@ -514,8 +515,10 @@ def main() -> int:
         for other in all_infos:
             if other["path"] == primary:
                 continue
-            shutil.copy2(other["path"], logs_dir / f"session-{other['id']}.jsonl")
-            (logs_dir / f"session-{other['id']}.md").write_text(
+            other_logs_dir = Path(args.out) / other["id"] / "logs"
+            other_logs_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(other["path"], other_logs_dir / f"session-{other['id']}.jsonl")
+            (other_logs_dir / f"session-{other['id']}.md").write_text(
                 transcript_markdown(other), encoding="utf-8"
             )
 

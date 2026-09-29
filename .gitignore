@@ -16,3 +16,7 @@ PiAgent/
 node_modules/
 __pycache__/
 *.log
+
+# Exported Pi transcripts and raw logs
+reports/pi-token-usage/*/logs/*.jsonl
+reports/pi-token-usage/*/logs/*.md
