@@ -1,13 +1,10 @@
-# 任务目录
+# 任务说明的来源
 
-- `catch_001/`：已适配 GameEva 的可运行任务包，包含 `task.yaml`、`acceptance.yaml` 和冻结的 `verification/scenario.gd`。
-- `puzzle-magnet-lab/`：GameCraft-Bench 原题 **Puzzle Magnet Lab**，原样保存 `instruction.md`、`task.toml`。
-- `horror-signal-lost/`：GameCraft-Bench 原题 **Horror Signal Lost**，原样保存 `instruction.md`、`task.toml`。
-- `keepsake/`：GameCraft-Bench 原题 **Keepsake**，原样保存 `instruction.md`、`task.toml`。
-- `racing-trick-runner/`：GameCraft-Bench 原题 **Racing Trick Runner**，原样保存 `instruction.md`、`task.toml`。
+这里保存用于 LTGD 开发和本地比较的游戏需求，不是插件运行时自动读取的任务队列。
 
-前三题保留原文，来源与哈希见 [筛选记录](../benchmarks/gamecraft_bench_selected/README.md)。新增的 `racing-trick-runner/` 也保留原文，其来源与哈希见对应 `*_window/修改说明.md`。这些原题含 Linux 路径且没有本地玩法评测，不宜直接用于 Windows 比较。对应的 `*_window/` 目录另存 Windows 技术适配版，每目录有 `instruction.md`、`task.toml`、`修改说明.md`；原文件不删除、不覆盖。
+| 目录 | 来历 |
+| --- | --- |
+| `horror-signal-lost/`、`puzzle-magnet-lab/`、`platformer-ivory-beats/` | [GameCraft-Bench](https://github.com/FreedomIntelligence/gamecraft-bench) 的原始任务说明。`instruction.md` 保留原题的 Linux 工作区路径与交付要求；`task.toml` 记录任务元数据。 |
+| 对应的 `*_window/` | 基于同名任务制作的本地 Windows 适配版。游戏目标仍来自原题，工程路径、Godot 命令和截图步骤改为适配本工作区。 |
 
-- `puzzle-magnet-lab_window/`、`horror-signal-lost_window/`、`keepsake_window/`、`racing-trick-runner_window/`：供 Windows 游戏开发使用，保留英文原题的玩法要求，适配本地路径和 Godot 命令，并移除 Demo 轨迹交付要求。各目录没有预置玩法断言或测试桥；Godot 导入与启动通过只说明工程可运行，玩法仍需试玩。
-
-这些是 GameEva Windows 适配任务，不是上游 Harbor/多模态评分器的官方结果。
+原题与适配版分目录保存，便于区分题目来源和本地改写。适配版用于本地运行、观察 LTGD 与直接生成的结果；它不是 GameCraft-Bench 官方评分器的输出。Godot 工程能导入、启动，也不等于玩法要求已经通过人工验证。

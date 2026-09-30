@@ -1,0 +1,26 @@
+63f7b34db8d8cdea90c76aacccf841ec
+::res://::1790744606
+icon.svg::CompressedTexture2D::1683858012254886052::1790737421::1790737433::1::::<><><>0<>0<>e9f2e2a3bce58c0953b6cc2bf504925a<>res://.godot/imported/icon.svg-218a8f2b3041327d8a5756f3a245f83b.ctex::
+Main.tscn::PackedScene::-1::1790737606::0::1::::<><><>0<>0<><>::res://scripts/main.gd<>res://scenes/Board.tscn<>res://scripts/ui.gd
+::res://assets/::1790739644
+ATTRIBUTION.txt::TextFile::-1::1790737625::0::1::::<><><>0<>0<><>::
+::res://assets/audio/::1790739644
+click.ogg::AudioStreamOggVorbis::612216537477507379::1790737237::1790737433::1::::<><><>0<>0<>5edfb87d42a5178fbfdf41e90393b9f5<>res://.godot/imported/click.ogg-cb6f8e57848df8181589839958189a7f.oggvorbisstr::
+escape.ogg::AudioStreamOggVorbis::2319053500280008038::1790737237::1790737433::1::::<><><>0<>0<>cae3d716850c0a419b384cab08d75305<>res://.godot/imported/escape.ogg-1de7410af2958dfd8d0a7cf78fc0e314.oggvorbisstr::
+hit.ogg::AudioStreamOggVorbis::4787602592052019196::1790737237::1790737433::1::::<><><>0<>0<>9b206b7f9507fed091c7ede5a8e4e864<>res://.godot/imported/hit.ogg-f5af0fa4fe598f6d1626307de0257688.oggvorbisstr::
+lose.ogg::AudioStreamOggVorbis::1242006865674667518::1790737237::1790737433::1::::<><><>0<>0<>1b7f04e6e1ae8fca20a64f455320baa2<>res://.godot/imported/lose.ogg-aee449e799d6379837dbd4a84caf868b.oggvorbisstr::
+mistap.ogg::AudioStreamOggVorbis::331023500274943414::1790737237::1790737433::1::::<><><>0<>0<>d5ef8b9cc94b98aac6601e50086a1ce4<>res://.godot/imported/mistap.ogg-38533a48641e1d0ca7d8b0ee312573c7.oggvorbisstr::
+perfect.ogg::AudioStreamOggVorbis::2692160220894639090::1790737237::1790737433::1::::<><><>0<>0<>3b0204dc6d7efa0005dcfac340535adb<>res://.godot/imported/perfect.ogg-f3b1cc4bcf02af66f02642f9a0c17e65.oggvorbisstr::
+start.ogg::AudioStreamOggVorbis::8207871273597697056::1790737237::1790737433::1::::<><><>0<>0<>074c1df0d2fbceb521f890205dfe6b7c<>res://.godot/imported/start.ogg-2dca3d137a154ca8619973378cf0e771.oggvorbisstr::
+victory.ogg::AudioStreamOggVorbis::3326516907048593605::1790737237::1790737433::1::::<><><>0<>0<>c447b754da81b790986db3ba9709d239<>res://.godot/imported/victory.ogg-243ee7d9768382f12b5fe4c0cfe2e241.oggvorbisstr::
+::res://assets/fonts/::1790739644
+Kenney Future.ttf::FontFile::6941611900378741432::1790737237::1790737433::1::::<><><>0<>0<>a17723c03753af8240924798b786d8d8<>res://.godot/imported/Kenney Future.ttf-845b8d86f13614effd75cae8b9fe56b9.fontdata::
+Kenney Mini Square Mono.ttf::FontFile::4339924137310661259::1790737237::1790737433::1::::<><><>0<>0<>d496aacd216e1c479d4ee8c067115406<>res://.godot/imported/Kenney Mini Square Mono.ttf-15585882c330a00feae41b0d2381ac2d.fontdata::
+::res://scenes/::1790739644
+Board.tscn::PackedScene::-1::1790737606::0::1::::<><><>0<>0<><>::res://scripts/board.gd
+::res://scripts/::1790739644
+board.gd::GDScript::5228794398209943205::1790737543::0::1::::IvoryBoard<>Control<><>0<>0<><>::
+main.gd::GDScript::2083693231711193400::1790737573::0::1::::<>Node2D<><>0<>0<><>::
+save_manager.gd::GDScript::5073259966932327889::1790737359::0::1::::<>Node<><>0<>0<><>::
+sfx.gd::GDScript::5872089864283077022::1790737359::0::1::::<>Node<><>0<>0<><>::
+ui.gd::GDScript::8300624645132054785::1790737606::0::1::::IvoryUI<>CanvasLayer<><>0<>0<><>::

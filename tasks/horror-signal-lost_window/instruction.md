@@ -1,8 +1,6 @@
 # Horror Signal Lost
 
-Build a **Horror Signal Lost** game in Godot 4 in the current Pi working
-directory, unless the user explicitly specifies a project or delivery path.
-In that case, build directly at the requested path.
+Build a **Horror Signal Lost** game in Godot 4 `.\output\game`
 This is not a prototype. It is a **complete, shippable micro-game** that could
 sit on an itch.io page or Steam as a polished vertical slice.
 
@@ -40,7 +38,13 @@ the horror unfolding beyond the walls.
    signals become more disturbing, and the window shows shapes moving outside.
    The final signal reveals what is hunting the player.
 
-## Assets
+## Engine & Assets
+
+From the repository root, 
+
+the Godot engine is at `Godot_Engine\Godot_v4.6.2-stable_win64.exe` 
+
+the Godot console is at `Godot_Engine\Godot_v4.6.2-stable_win64_console.exe`.
 
 2D assets are available read-only at these paths relative to the repository root:
 
@@ -53,45 +57,48 @@ Copy what you need into your project's `assets/` folder.
 
 ## Project layout
 
-The LTGD launcher keeps Pi's current working directory. Call
-`godot_set_project` before editing: pass the user's explicit project or delivery
-directory when given, or omit the path to create `game/` under Pi's current
-directory. Put all Godot project files there. Relative project paths start from
-Pi's current directory. From the repository root, the Godot console is at
-`Godot_Engine/Godot_v4.6.2-stable_win64_console.exe`.
-
 ```
-game/    (default project directory; an explicit path takes precedence)
+.\output\game
   project.godot
   Main.tscn
-  scripts/  scenes/  assets/
+  scripts\
+  scenes\
+  assets\
 ```
 
 From the repository root, set `$projectDir` to the actual game project directory
 and confirm that it launches cleanly. Use the user's specified path when given:
 
 ```powershell
-$projectDir = Join-Path (Get-Location).Path "game"  # use the explicit project path when given
+$projectDir = Join-Path (Get-Location).Path "output\game"
 & .\Godot_Engine\Godot_v4.6.2-stable_win64_console.exe --headless --path $projectDir --quit-after 5
 ```
 
-Use the Godot 4 command-line documentation for engine flags.
+A reference for Godot CLI flags is at `.\tools\godot_command_line.md`.
+**Engine flags like `--headless` and `--quit-after N` must come BEFORE `--`** —
+anything after `--` is forwarded to the project as user args and silently
+ignored by the engine. From the repository root, the correct shape is:
+`.\Godot_Engine\Godot_v4.6.2-stable_win64_console.exe --headless --quit-after 5 --path .\output\game -- --scenario near_victory`.
 
-A screenshot helper is available at
-`C:\Research\LTGDAgentSystem\LTGDAgentSystem\tools\screenshot.ps1`. When a
-screen needs visual inspection, run it from the Godot project directory, then
-use Pi's `read` tool to view the PNG:
-
-```powershell
-& "C:\Research\LTGDAgentSystem\LTGDAgentSystem\tools\screenshot.ps1" -Out "$env:TEMP\frame.png" -Frames 60
-```
-
-If the game supports a named scenario, pass `-Scenario <id>` to capture it:
+A screenshot helper is available at `.\tools\screenshot.ps1`. Use it to actually see what your UI / battlefield / result screens look like.
 
 ```powershell
-& "C:\Research\LTGDAgentSystem\LTGDAgentSystem\tools\screenshot.ps1" -Out "$env:TEMP\signal_scan.png" -Frames 120 -Scenario signal_scan
+& ".\tools\screenshot.ps1" `
+    -Project ".\output\game" `
+    -Out "$env:TEMP\frame.png" `
+    -Frames 60
 ```
 
-The game reads that value from `OS.get_cmdline_user_args()`.
+To screenshot a specific scenario, pass `-Scenario <id>` to the PowerShell
+helper. The helper accepts `-Project` , `-Out`, `-Frames`, `-Scene`, and `-Scenario` as
+PowerShell parameters. Additional game arguments can be passed through
+`-GameArgs` and remain available to the game through
+`OS.get_cmdline_user_args()`.
 
-Do not create demo input traces or replay scripts unless the user asks.
+```powershell
+& ".\tools\screenshot.ps1" `
+    -Project ".\output\game" `
+    -Out "$env:TEMP\signal_scan.png" `
+    -Frames 120 `
+    -Scenario "signal_scan"
+```

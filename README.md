@@ -1,15 +1,48 @@
 # LTGD Agent System
 
-这里用 Pi 作为游戏开发入口。在命令行进入希望作为工作目录的文件夹，再运行 LTGD 的 CMD 脚本并用自然语言描述需求。
+LTGD（Low-Token Game Development）是一个面向 **Pi 的 Godot 游戏开发扩展**。用户在 Pi 对话中用自然语言描述游戏；扩展在 Pi 原有的编码能力之外，负责记录任务状态、检查生成的 Godot 工程，并在确认失败时安排定向修复。它不是独立的游戏生成程序，也不需要在本仓库放一份 Pi 源码。
 
-```cmd
-LTGDAgentSystem\start.cmd
+## 思路与目标
+
+LTGD 先让 Generator 完成一版可检查的工程，再由 Executor 用 Godot 和原始需求检查结果；只有发现具体错误或缺项，才调用短上下文 Planner 给出修复步骤。这样把模型调用集中在实际问题上，减少没有明确失败依据的规划和返工，同时保留基本的工程运行检查。
+
+```text
+Pi 中的自然语言需求
+  → Generator 创建 Godot 工程并交出工程路径
+  → Executor 检查主场景、导入和启动，再审查原始需求
+  → 全部通过：完成
+  → 确认失败：Planner 给出修复步骤 → Generator 修改 → Executor 复查
 ```
 
-脚本调用已安装的 `pi` 命令并加载 PaT 扩展，不依赖本地 `PiAgent/`。用户指定输出目录时使用该目录；未指定时在当前目录创建 `game/`。模型、登录信息与会话仍由 Pi 管理。扩展源码与流程见 [LTGDAgentSystem](LTGDAgentSystem/README.md)。
+Generator、Executor、Planner 是扩展中的三个职责。需求审查是 Executor 的一个检查阶段。Godot 导入和启动通过，只说明工程能运行到相应阶段；自动审查不能替代人工试玩、画面检查或完整的玩法评测。流程与停止条件详见 [扩展说明](LTGDAgentSystem/README.md)。
 
-扩展让 Pi 原生 Generator 直接制作游戏。Generator 结束本轮后，Executor 自动运行 Godot 导入与启动验证，再独立审查原始需求；任一检查确认失败才调用短上下文 Planner，Generator 按修复计划修改后再次交给 Executor。两项检查均通过后，任务标记为完成。验证结果保存在 Pi 任务状态中。
+## 准备环境
 
-顶层 `assets/` 是只读公共素材库，`Godot_Engine/` 是本地 Godot 4.6.2。历史 Python 实现仍在相邻的 `../GameEva/` 仓库，仅作为迁移参照，不是新入口。
+1. 在 Windows 上安装 Pi，并确认命令行能运行 `pi`。Pi 负责模型配置、登录和会话。
+2. 在仓库根目录的 `Godot_Engine/` 放置 `Godot_v4.6.2-stable_win64_console.exe`。当前扩展按这个相对路径调用 Godot；引擎文件不随本仓库提交。
+3. 如需使用共享素材，把素材放在仓库根目录的 `assets/`。扩展要求生成过程不要修改 `assets/` 或 `Godot_Engine/`。
 
-在 Windows 上需要查看游戏实际画面时，可用 [按帧截图助手](LTGDAgentSystem/README.md#按帧截图windows)。
+## 使用
+
+先进入希望作为 Pi 工作目录的文件夹，再运行仓库里的启动脚本。例如在 CMD 中：
+
+```cmd
+cd /d C:\Games\my-workspace
+C:\path\to\LTGDAgentSystem\LTGDAgentSystem\start.cmd
+```
+
+脚本实际执行的是 `pi --extension <仓库路径>\LTGDAgentSystem\godot-pat\index.ts`。进入 Pi 后，直接描述游戏需求，例如“做一个可以通过调节频率寻找信号的 Godot 小游戏”。用户指定输出目录时使用指定目录；否则在 Pi 当前工作目录创建 `game/`。一项游戏任务结束后，开启新的 Pi 会话处理下一项任务。
+
+Generator 交出实际工程路径后，Executor 自动运行检查，结果保存在 Pi 会话中。输入 `/godot-status` 可查看当前阶段和最近一次 Godot 检查；工程路径绑定后，还可使用 `godot_inspect_project` 和 `godot_inspect_scene` 查看简要结构。
+
+## 仓库内容
+
+| 目录 | 内容与来源 |
+| --- | --- |
+| [`LTGDAgentSystem/`](LTGDAgentSystem/README.md) | Pi 扩展、启动脚本和扩展测试；这是插件主体。 |
+| [`tasks/`](tasks/README.md) | 用于开发与比较的任务说明，包括 GameCraft-Bench 原题及本地 Windows 适配版。 |
+| [`tools/`](tools/README.md) | Godot 命令行参考和 Windows 截图辅助脚本。 |
+| [`reports/`](reports/README.md) | LTGD 开发过程中使用的 Pi 用量导出工具说明。 |
+| [`output/`](output/README.md) | 本地实验生成的游戏工程和用量导出结果；不是插件运行所必需的源码。 |
+
+`assets/` 和 `Godot_Engine/` 是本地依赖；相邻的 `../GameEva/` 是迁移参考仓库。它们都不是 LTGD 扩展源码。各目录 README 说明了现有内容的来历和用途。
