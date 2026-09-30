@@ -42,14 +42,16 @@ The archived usage exports in `output/token_usage/` are a separate historical ob
 
 The five passing projects produced no blocking Godot diagnostic in this recheck. This says the engine could import and start their main scenes for the bounded check. It does not show that menus, controls, win conditions, visuals, or audio met their respective task instructions.
 
-| Archived task and condition | Model calls | Total Tokens | Output Tokens | Estimated cost USD |
-| --- | ---: | ---: | ---: | ---: |
-| Horror Signal Lost direct | 171 | 32,891,257 | 242,006 | 0.512166 |
-| Horror Signal Lost LTGD | 123 | 16,404,990 | 153,278 | 0.298924 |
-| Puzzle Magnet Lab direct | 174 | 34,650,322 | 239,879 | 0.518349 |
-| Puzzle Magnet Lab LTGD | 138 | 19,465,906 | 188,248 | 0.357621 |
+| Game | Run | Calls | Total Tokens | Output Tokens | Cost USD |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Horror Signal Lost | Direct | 171 | 32,891,257 | 242,006 | 0.512166 |
+| Horror Signal Lost | LTGD | 123 | 16,404,990 | 153,278 | 0.298924 |
+| Puzzle Magnet Lab | Direct | 174 | 34,650,322 | 239,879 | 0.518349 |
+| Puzzle Magnet Lab | LTGD | 138 | 19,465,906 | 188,248 | 0.357621 |
+| Ivory Beats | Direct | 73 | 8,268,231 | 129,873 | 0.220367 |
+| Ivory Beats | LTGD | 53 | 5,121,436 | 101,126 | 0.163108 |
 
-The archived LTGD sessions have lower logged totals in these two task pairs. The logs do not establish why: each condition has one run, the sessions used an earlier controller revision, and gameplay acceptance was not measured by a common evaluator. An Ivory Beats direct usage export exists, but the matching LTGD export is absent, so it is excluded from the pair table. These numbers are descriptive records, not results for the current extension version.
+The six rows come from `output/token_usage/{HSL,MAG,PIB}_{direct,LTGD}/usage.json`; all sessions used `deepseek-flash`. Total Tokens include uncached input, cache read, cache write, and output; reasoning tokens are already included in output. The archived LTGD sessions have lower logged totals in all three task pairs. The logs do not establish why: each condition has one run, the sessions used an earlier controller revision, and gameplay acceptance was not measured by a common evaluator. These numbers are descriptive records, not results for the current extension version.
 
 ## 5 Limitations
 

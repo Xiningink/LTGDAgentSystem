@@ -151,7 +151,7 @@ def add_table(doc, rows, chinese):
     table.style = "Table Grid"
     table.autofit = False
     n = len(rows[0])
-    widths = {3: [1.32, 2.2, 3.25], 4: [1.27, 1.77, 1.83, 1.9], 5: [1.77, 1.05, 1.4, 1.4, 1.15]}.get(n, [6.77 / n] * n)
+    widths = {3: [1.32, 2.2, 3.25], 4: [1.27, 1.77, 1.83, 1.9], 5: [1.77, 1.05, 1.4, 1.4, 1.15], 6: [1.57, 0.69, 0.65, 1.44, 1.27, 1.15]}.get(n, [6.77 / n] * n)
     if chinese and n == 4:
         widths = [0.93, 1.88, 2.19, 1.77]
     for i, value in enumerate(rows[0]):
@@ -165,11 +165,13 @@ def add_table(doc, rows, chinese):
             cells[i].width = Inches(widths[i])
             cells[i].text = clean_inline(value)
     for ri, row in enumerate(table.rows):
-        for cell in row.cells:
+        for ci, cell in enumerate(row.cells):
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             for p in cell.paragraphs:
                 p.paragraph_format.space_after = Pt(0)
                 p.paragraph_format.space_before = Pt(0)
+                if n == 6 and ri > 0:
+                    p.alignment = WD_ALIGN_PARAGRAPH.LEFT if ci == 0 else WD_ALIGN_PARAGRAPH.CENTER if ci == 1 else WD_ALIGN_PARAGRAPH.RIGHT
                 for run in p.runs:
                     run.font.name = "Microsoft YaHei" if chinese else "Arial"
                     run.font.size = Pt(8.4 if chinese else 8.7)

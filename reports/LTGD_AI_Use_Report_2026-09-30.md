@@ -25,7 +25,7 @@ Generator 从用户的自然语言直接编写场景和脚本，最后交出真�
 | 英文方法叙述 | 旧报告：“On the first technical failure, the controller enters repair ... A second failed verification moves to plan.” | 新报告：“Any confirmed Godot failure or concrete missing requirement moves the task to `plan`.” | `controller.ts` 的 `recordVerification` 在首次失败后即设为 `plan`；旧句已与代码不符。 |
 | 完成条件 | 旧图使用 “Verified → Finish gate / godot_finish to done”。 | 新图使用 “Godot PASS → Requirement review → done”，`missing` 返回 Planner。 | 当前实现没有 `godot_finish` 工具；需求审查是独立模型请求。 |
 | 初稿中的套话 | “本系统并不是盲目生成游戏，而是通过多角色闭环确保质量。” | “Generator 写入工程后，Executor 自动导入并启动 Godot；需求审查另行检查原始要求。两项通过才记为 `done`。” | 初稿用否定式解释和“确保质量”掩盖了检查边界。修订句交代动作与完成条件。 |
-| 结果表述 | “LTGD 显著降低 Token 消耗并提高游戏质量。” | “两组历史 LTGD 会话的记录总量较低；当前资料不能证明这种差异由扩展造成，也没有共同的玩法评分。” | 每组只有一次旧版本会话，缺少相同评价标准，不能做因果或质量判断。 |
+| 结果表述 | “LTGD 显著降低 Token 消耗并提高游戏质量。” | “三组历史 LTGD 会话的记录总量较低；当前资料不能证明这种差异由扩展造成，也没有共同的玩法评分。” | 每组只有一次旧版本会话，缺少相同评价标准，不能做因果或质量判断。 |
 
 下图把旧报告 Figure 2 的关系按原意重绘。它显示“首次失败先局部修复”和“godot_finish 完成”，适合旧实现，却会误导读者理解当前代码。
 
@@ -37,7 +37,7 @@ Generator 从用户的自然语言直接编写场景和脚本，最后交出真�
 
 ## 5 检查和修正方式
 
-我用源码核对流程，尤其检查 `recordVerification`、`finishTask` 和 `agent_before_settle` 的转移；用测试结果确认这些分支可执行；用隔离副本重跑 Godot，避免把历史截图或会话总结误当作当前验证。写作后又检查夸大词、空泛的“闭环”说法和“不是……而是……”式句子，把它们改为有文件或测试支撑的动作。作图后逐条追踪箭头：Godot 失败不能直达 `done`，需求缺失不能绕过 Planner，Planner 不能直接改工程。最后渲染两份 DOCX，检查分页、表格、图中字形和箭头是否清楚。
+我用源码核对流程，尤其检查 `recordVerification`、`finishTask` 和 `agent_before_settle` 的转移；用测试结果确认这些分支可执行；用隔离副本重跑 Godot，避免把历史截图或会话总结误当作当前验证。复核用量目录时还发现原英文表漏掉了 `output/token_usage/PIB_LTGD/usage.json`。补入后，Ivory Beats 的 Direct 与 LTGD 记录分别为 8,268,231 和 5,121,436 Total Tokens。写作后又检查夸大词、空泛的“闭环”说法和“不是……而是……”式句子，把它们改为有文件或测试支撑的动作。作图后逐条追踪箭头：Godot 失败不能直达 `done`，需求缺失不能绕过 Planner，Planner 不能直接改工程。最后渲染两份 DOCX，检查分页、表格、图中字形和箭头是否清楚。
 
 ## 6 仍需人工判断的部分
 
