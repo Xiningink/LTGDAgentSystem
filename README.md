@@ -19,8 +19,8 @@ Generator、Executor、Planner 是扩展中的三个职责。需求审查是 Exe
 ## 准备环境
 
 1. 在 Windows 上安装 Pi，并确认命令行能运行 `pi`。Pi 负责模型配置、登录和会话。
-2. 在仓库根目录的 `Godot_Engine/` 放置 `Godot_v4.6.2-stable_win64_console.exe`。当前扩展按这个相对路径调用 Godot；引擎文件不随本仓库提交。
-3. 如需使用共享素材，把素材放在仓库根目录的 `assets/`。扩展要求生成过程不要修改 `assets/` 或 `Godot_Engine/`。
+2. 按 [`Godot_Engine/README.md`](Godot_Engine/README.md) 下载 Godot 4.6.2 Windows 标准版，并把程序放在指定路径。引擎文件不随本仓库提交。
+3. 如需使用共享素材，按 [`assets/README.md`](assets/README.md) 获取并放置素材。扩展要求生成过程不要修改 `assets/` 或 `Godot_Engine/`。
 
 ## 使用
 
@@ -40,6 +40,8 @@ Generator 交出实际工程路径后，Executor 自动运行检查，结果保�
 | 目录 | 内容与来源 |
 | --- | --- |
 | [`LTGDAgentSystem/`](LTGDAgentSystem/README.md) | Pi 扩展、启动脚本和扩展测试；这是插件主体。 |
+| [`Godot_Engine/`](Godot_Engine/README.md) | 本地 Godot 4.6.2 的获取与放置说明；仓库不包含引擎程序。 |
+| [`assets/`](assets/README.md) | 本地共享素材的获取与许可说明；仓库不包含素材库。 |
 | [`tasks/`](tasks/README.md) | 用于开发与比较的任务说明，包括 GameCraft-Bench 原题及本地 Windows 适配版。 |
 | [`tools/`](tools/README.md) | Godot 命令行参考和 Windows 截图辅助脚本。 |
 | [`reports/`](reports/README.md) | LTGD 开发过程中使用的 Pi 用量导出工具说明。 |

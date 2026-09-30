@@ -1,5 +1,7 @@
-# Large local runtimes and generated game output
-assets/
-Godot_Engine/
+# Local dependencies: keep only their retrieval instructions in Git
+assets/*
+!assets/README.md
+Godot_Engine/*
+!Godot_Engine/README.md
 games/
 AGENTS.md
