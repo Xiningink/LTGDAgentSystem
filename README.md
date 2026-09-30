@@ -24,14 +24,16 @@ Generator、Executor、Planner 是扩展中的三个职责。需求审查是 Exe
 
 ## 使用
 
-先进入希望作为 Pi 工作目录的文件夹，再运行仓库里的启动脚本。例如在 CMD 中：
+可以先从 [`tasks/`](tasks/README.md) 挑一个示例。`horror-signal-lost/` 等同名原题保留了上游 GameCraft-Bench 面向 Linux 的 `/workspace/...` 路径和命令；在 Windows 上使用本仓库时，请参考对应的 `*_window/` 目录，它们是针对本地路径、Godot 命令和截图方式调整的版本。
+
+要使用这些示例，先在 CMD 中进入仓库根目录，再运行启动脚本：
 
 ```cmd
-cd /d C:\Games\my-workspace
-C:\path\to\LTGDAgentSystem\LTGDAgentSystem\start.cmd
+cd /d C:\path\to\LTGDAgentSystem
+LTGDAgentSystem\start.cmd
 ```
 
-脚本实际执行的是 `pi --extension <仓库路径>\LTGDAgentSystem\godot-pat\index.ts`。进入 Pi 后，直接描述游戏需求，例如“做一个可以通过调节频率寻找信号的 Godot 小游戏”。用户指定输出目录时使用指定目录；否则在 Pi 当前工作目录创建 `game/`。一项游戏任务结束后，开启新的 Pi 会话处理下一项任务。
+脚本实际执行的是 `pi --extension <仓库路径>\LTGDAgentSystem\godot-pat\index.ts`。进入 Pi 后，用自然语言描述需求；例如可以输入：“请参考 `tasks/horror-signal-lost_window/instruction.md`，在 `.\output\game` 制作这个游戏。”扩展会把提到的任务目录文件纳入需求审查。也可以自行描述游戏，不使用示例；用户指定输出目录时使用指定目录，否则在 Pi 当前工作目录创建 `game/`。一项游戏任务结束后，开启新的 Pi 会话处理下一项任务。
 
 Generator 交出实际工程路径后，Executor 自动运行检查，结果保存在 Pi 会话中。输入 `/godot-status` 可查看当前阶段和最近一次 Godot 检查；工程路径绑定后，还可使用 `godot_inspect_project` 和 `godot_inspect_scene` 查看简要结构。
 
