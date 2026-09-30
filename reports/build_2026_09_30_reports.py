@@ -79,7 +79,7 @@ def architecture():
     arrow(d, [(780, 245), (870, 245)])
     arrow(d, [(1190, 245), (1280, 245)])
     box(d, (260, 445, 760, 575), "Planner model", ["Only after confirmed failure"], fill=LIGHT, title_size=32, body_size=25)
-    box(d, (1000, 445, 1530, 575), "Godot and review model", ["Engine check, then source review"], fill=LIGHT, title_size=32, body_size=25)
+    box(d, (1000, 445, 1530, 575), "Executor checks", ["Godot local; review uses model"], fill=LIGHT, title_size=32, body_size=25)
     arrow(d, [(1470, 350), (1470, 420), (1260, 420), (1260, 445)], color=BLUE)
     arrow(d, [(1000, 510), (760, 510)], color=RED, label="failure", label_xy=(825, 470), label_size=24)
     arrow(d, [(500, 445), (500, 390), (610, 390), (610, 350)], color=GREEN, label="repair steps", label_xy=(320, 390), label_size=22)
@@ -88,21 +88,21 @@ def architecture():
 
 def control_flow():
     im, d = canvas(1800, 860)
-    d.text((60, 28), "Current LTGD control flow", fill=NAVY, font=font(44, True))
+    d.text((60, 28), "Failure-triggered calls and token costs", fill=NAVY, font=font(44, True))
     box(d, (60, 125, 385, 325), "Generator", ["Write game", "handoff path"])
-    box(d, (485, 125, 810, 325), "Executor", ["Structure, import", "headless boot"])
-    box(d, (910, 125, 1235, 325), "Review", ["Original request", "and project files"])
-    box(d, (1360, 125, 1735, 325), "Done", ["Both checks passed"], fill=(231, 246, 237))
+    box(d, (485, 125, 810, 325), "Executor", ["Godot checks", "0 LLM tokens"])
+    box(d, (910, 125, 1235, 325), "Executor review", ["Extra model call", "reads project files"], title_size=31)
+    box(d, (1360, 125, 1735, 325), "Done", ["No plan on PASS"], fill=(231, 246, 237))
     arrow(d, [(385, 225), (485, 225)])
     arrow(d, [(810, 225), (910, 225)], color=GREEN, label="PASS", label_xy=(828, 175))
     arrow(d, [(1235, 225), (1360, 225)], color=GREEN, label="MET", label_xy=(1265, 175), label_size=23)
-    box(d, (700, 535, 1070, 735), "Planner", ["Scoped JSON repair", "or supported stop"], fill=LIGHT)
+    box(d, (700, 535, 1070, 735), "Planner", ["Model call on failure", "scoped repair evidence"], fill=LIGHT)
     box(d, (1360, 535, 1735, 735), "Stopped", ["Cannot repair or", "invalid handoff"], fill=(250, 242, 240))
     arrow(d, [(645, 325), (645, 635), (700, 635)], color=RED, label="GODOT FAIL", label_xy=(460, 435), label_size=23)
     arrow(d, [(1070, 325), (1070, 470), (885, 470), (885, 535)], color=RED, label="MISSING", label_xy=(1092, 405), label_size=23)
     arrow(d, [(700, 675), (220, 675), (220, 325)], color=BLUE, label="REVISE", label_xy=(365, 630), label_size=23)
     arrow(d, [(1070, 635), (1360, 635)], color=RED, label="CANNOT RESOLVE", label_xy=(1090, 590), label_size=23)
-    d.text((65, 790), "The reviewer reads files; this flow does not replay player input or inspect rendered frames.", fill=GRAY, font=font(25))
+    d.text((65, 790), "Review adds token cost on Godot PASS; repair adds Planner and Generator calls.", fill=GRAY, font=font(25))
     im.save(FIGURES / "ltgd_control_flow_2026-09-30.png")
 
 
@@ -151,7 +151,7 @@ def add_table(doc, rows, chinese):
     table.style = "Table Grid"
     table.autofit = False
     n = len(rows[0])
-    widths = {3: [1.32, 2.2, 3.25], 4: [1.27, 1.77, 1.83, 1.9], 5: [1.77, 1.05, 1.4, 1.4, 1.15], 6: [1.57, 0.69, 0.65, 1.44, 1.27, 1.15]}.get(n, [6.77 / n] * n)
+    widths = {3: [1.32, 2.2, 3.25], 4: [1.27, 1.77, 1.83, 1.9], 5: [1.77, 1.05, 1.4, 1.4, 1.15], 6: [1.57, 0.69, 0.65, 1.44, 1.27, 1.15], 7: [1.50, 0.69, 0.91, 0.91, 0.78, 1.04, 0.94], 8: [1.43, 0.55, 0.46, 0.76, 1.04, 0.69, 1.02, 0.82]}.get(n, [6.77 / n] * n)
     if chinese and n == 4:
         widths = [0.93, 1.88, 2.19, 1.77]
     for i, value in enumerate(rows[0]):
@@ -172,11 +172,11 @@ def add_table(doc, rows, chinese):
                 p.paragraph_format.space_before = Pt(0)
                 if ri == 0:
                     p.paragraph_format.keep_with_next = True
-                if n == 6 and ri > 0:
+                if n in (6, 7, 8) and ri > 0:
                     p.alignment = WD_ALIGN_PARAGRAPH.LEFT if ci == 0 else WD_ALIGN_PARAGRAPH.CENTER if ci == 1 else WD_ALIGN_PARAGRAPH.RIGHT
                 for run in p.runs:
                     run.font.name = "Microsoft YaHei" if chinese else "Arial"
-                    run.font.size = Pt(8.4 if chinese else 8.7)
+                    run.font.size = Pt(8.4 if chinese else 8.2 if n == 8 else 8.7)
                     run.font.bold = ri == 0
                     run.font.color.rgb = RGBColor(*NAVY) if ri == 0 else RGBColor(35, 42, 48)
         trpr = row._tr.get_or_add_trPr()
@@ -200,10 +200,10 @@ def build(markdown_name: str, docx_name: str, chinese: bool):
     styles = doc.styles
     normal = styles["Normal"]
     normal.font.name = "Microsoft YaHei" if chinese else "Arial"
-    normal.font.size = Pt(10.5)
+    normal.font.size = Pt(10.0 if chinese else 10.5)
     normal.font.color.rgb = RGBColor(35, 42, 48)
-    normal.paragraph_format.space_after = Pt(7)
-    normal.paragraph_format.line_spacing = 1.17
+    normal.paragraph_format.space_after = Pt(5 if chinese else 7)
+    normal.paragraph_format.line_spacing = 1.12 if chinese else 1.17
     title = styles["Title"]
     title.font.name = "Microsoft YaHei" if chinese else "Arial"
     title.font.size = Pt(20)
@@ -219,8 +219,8 @@ def build(markdown_name: str, docx_name: str, chinese: bool):
         st.font.size = Pt(size)
         st.font.bold = True
         st.font.color.rgb = RGBColor(*NAVY)
-        st.paragraph_format.space_before = Pt(13)
-        st.paragraph_format.space_after = Pt(6)
+        st.paragraph_format.space_before = Pt(10 if chinese else 13)
+        st.paragraph_format.space_after = Pt(5 if chinese else 6)
         st.paragraph_format.keep_with_next = True
     i = 0
     while i < len(lines):
@@ -241,7 +241,7 @@ def build(markdown_name: str, docx_name: str, chinese: bool):
                 p = doc.add_paragraph()
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 p.paragraph_format.space_before = Pt(5)
-                p.add_run().add_picture(str(image_path), width=Inches(6.75))
+                p.add_run().add_picture(str(image_path), width=Inches(6.15 if chinese else 6.75))
                 cap = doc.add_paragraph(clean_inline(match.group(1)))
                 cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 cap.paragraph_format.space_after = Pt(8)
