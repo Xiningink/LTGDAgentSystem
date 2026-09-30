@@ -266,7 +266,7 @@ def build(markdown_name: str, docx_name: str, chinese: bool):
         st.font.name = "Microsoft YaHei" if chinese else "Arial"
         st.font.size = Pt(size)
         st.font.bold = True
-        st.font.color.rgb = RGBColor(*NAVY)
+        st.font.color.rgb = RGBColor(0, 0, 0) if chinese else RGBColor(*NAVY)
         st.paragraph_format.space_before = Pt(10 if chinese else 13)
         st.paragraph_format.space_after = Pt(5 if chinese else 6)
         st.paragraph_format.keep_with_next = True
@@ -310,6 +310,8 @@ def build(markdown_name: str, docx_name: str, chinese: bool):
             doc.add_paragraph(clean_inline(line[2:]), style="List Bullet")
         else:
             p = doc.add_paragraph(clean_inline(line))
+            if line.endswith("："):
+                p.paragraph_format.keep_with_next = True
             if len(doc.paragraphs) == 2:
                 p.paragraph_format.space_after = Pt(17)
                 for run in p.runs:
