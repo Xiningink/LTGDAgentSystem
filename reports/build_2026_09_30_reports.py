@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -125,6 +126,51 @@ def legacy_flow():
     im.save(FIGURES / "ltgd_legacy_flow_2026-09-30.png")
 
 
+def total_tokens_chart():
+    usage_root = ROOT.parent / "output" / "token_usage"
+    games = [
+        ("Horror Signal Lost", "HSL"),
+        ("Puzzle Magnet Lab", "MAG"),
+        ("Ivory Beats", "PIB"),
+    ]
+    im, d = canvas(1800, 850)
+    d.text((60, 30), "Total tokens by game", fill=NAVY, font=font(44, True))
+    d.rectangle((1280, 50, 1314, 84), fill=NAVY)
+    d.text((1324, 49), "Baseline", fill=GRAY, font=font(26))
+    d.rectangle((1508, 50, 1542, 84), fill=GREEN)
+    d.text((1552, 49), "LTGD", fill=GRAY, font=font(26))
+
+    left, right, top, bottom = 185, 1730, 155, 635
+    for tick in range(0, 41, 10):
+        y = bottom - (tick / 40) * (bottom - top)
+        d.line([(left, y), (right, y)], fill=(219, 226, 231), width=2)
+        d.text((107 if tick == 0 else 92, y - 16), f"{tick}", fill=GRAY, font=font(24))
+    d.text((59, 113), "Million tokens", fill=GRAY, font=font(24))
+
+    centers = [420, 960, 1500]
+    bar_width = 150
+    for center, (name, code) in zip(centers, games):
+        values = []
+        for run in ("direct", "LTGD"):
+            path = usage_root / f"{code}_{run}" / "usage.json"
+            values.append(json.loads(path.read_text(encoding="utf-8"))["totals"]["total"])
+        for value, x, color in zip(values, (center - 170, center + 20), (NAVY, GREEN)):
+            y = round(bottom - value / 40_000_000 * (bottom - top))
+            d.rectangle((x, y, x + bar_width, bottom), fill=color)
+            label = f"{value / 1_000_000:.2f}M"
+            bbox = d.textbbox((0, 0), label, font=font(25, True))
+            d.text((x + (bar_width - (bbox[2] - bbox[0])) / 2, y - 37), label, fill=color, font=font(25, True))
+        label_box = d.textbbox((0, 0), name, font=font(26, True))
+        d.text((center - (label_box[2] - label_box[0]) / 2, 654), name, fill=NAVY, font=font(26, True))
+        saving = (values[0] - values[1]) / values[0] * 100
+        saving_label = f"{saving:.1f}% fewer"
+        saving_box = d.textbbox((0, 0), saving_label, font=font(24))
+        d.text((center - (saving_box[2] - saving_box[0]) / 2, 700), saving_label, fill=GREEN, font=font(24))
+
+    d.text((185, 789), "One archived run per condition; totals include cached reads.", fill=GRAY, font=font(22))
+    im.save(FIGURES / "ltgd_total_tokens_2026-09-30.png")
+
+
 def set_cell_shading(cell, fill):
     tc_pr = cell._tc.get_or_add_tcPr()
     shd = OxmlElement("w:shd")
@@ -143,7 +189,7 @@ def add_page_number(section):
 
 
 def clean_inline(text: str) -> str:
-    return text.replace("**", "").replace("`", "")
+    return text.replace("**", "").replace("`", "").replace("<br>", "\n")
 
 
 def add_table(doc, rows, chinese):
@@ -151,9 +197,9 @@ def add_table(doc, rows, chinese):
     table.style = "Table Grid"
     table.autofit = False
     n = len(rows[0])
-    widths = {3: [1.32, 2.2, 3.25], 4: [1.27, 1.77, 1.83, 1.9], 5: [1.77, 1.05, 1.4, 1.4, 1.15], 6: [1.57, 0.69, 0.65, 1.44, 1.27, 1.15], 7: [1.50, 0.69, 0.91, 0.91, 0.78, 1.04, 0.94], 8: [1.43, 0.55, 0.46, 0.76, 1.04, 0.69, 1.02, 0.82]}.get(n, [6.77 / n] * n)
-    if chinese and n == 4:
-        widths = [0.93, 1.88, 2.19, 1.77]
+    widths = {3: [1.32, 2.2, 3.25], 4: [1.27, 1.77, 1.83, 1.9], 5: [1.77, 1.05, 1.4, 1.4, 1.15], 6: [1.65, 0.70, 1.22, 1.18, 0.92, 1.10], 7: [1.50, 0.69, 0.91, 0.91, 0.78, 1.04, 0.94], 8: [1.43, 0.55, 0.46, 0.76, 1.04, 0.69, 1.02, 0.82]}.get(n, [6.77 / n] * n)
+    if n == 4:
+        widths = [0.93, 1.88, 2.19, 1.77] if chinese else [1.32, 2.15, 2.15, 1.15]
     for i, value in enumerate(rows[0]):
         cell = table.rows[0].cells[i]
         cell.width = Inches(widths[i])
@@ -174,11 +220,13 @@ def add_table(doc, rows, chinese):
                     p.paragraph_format.keep_with_next = True
                 if n in (6, 7, 8) and ri > 0:
                     p.alignment = WD_ALIGN_PARAGRAPH.LEFT if ci == 0 else WD_ALIGN_PARAGRAPH.CENTER if ci == 1 else WD_ALIGN_PARAGRAPH.RIGHT
+                if n == 4 and not chinese and ri > 0 and ci == 3:
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 for run in p.runs:
                     run.font.name = "Microsoft YaHei" if chinese else "Arial"
                     run.font.size = Pt(8.4 if chinese else 8.2 if n == 8 else 8.7)
-                    run.font.bold = ri == 0
-                    run.font.color.rgb = RGBColor(*NAVY) if ri == 0 else RGBColor(35, 42, 48)
+                    run.font.bold = ri == 0 or (n == 4 and not chinese and ri > 0 and ci == 3)
+                    run.font.color.rgb = RGBColor(*NAVY) if ri == 0 else RGBColor(*GREEN) if n == 4 and not chinese and ci == 3 else RGBColor(35, 42, 48)
         trpr = row._tr.get_or_add_trPr()
         cant = OxmlElement("w:cantSplit")
         trpr.append(cant)
@@ -277,5 +325,6 @@ if __name__ == "__main__":
     architecture()
     control_flow()
     legacy_flow()
+    total_tokens_chart()
     build("LTGD_Technical_Report_2026-09-30.md", "LTGD_Technical_Report_2026-09-30.docx", False)
     build("LTGD_AI_Use_Report_2026-09-30.md", "LTGD_AI_Use_Report_2026-09-30.docx", True)

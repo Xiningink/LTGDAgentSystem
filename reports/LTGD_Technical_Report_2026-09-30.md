@@ -76,26 +76,25 @@ The five passing projects produced no blocking Godot diagnostic in this recheck.
 
 ### 4.2 Historical token usage
 
-Table 1. Provider-reported usage for one archived run per task and condition. Input excludes cache reads. All token columns are counts; cache write was zero in every run. PIB is the archive identifier for Ivory Beats.
+Table 1. One archived Baseline (ordinary Pi) run and one LTGD run per game. Each run lists model calls, uncached input tokens, cache-read tokens, output tokens, Total Tokens, and estimated USD cost. Cache-write tokens were zero in all six runs, so Total Tokens = Input + Cache read + Output. Total token saving = (Baseline Total Tokens − LTGD Total Tokens) / Baseline Total Tokens × 100, rounded to one decimal. PIB is the archive identifier for Ivory Beats.
 
-| Game | Run | Calls | Input | Cache read | Output | Total Tokens | Cost USD |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Horror Signal Lost | Direct | 171 | 87,971 | 32,561,280 | 242,006 | 32,891,257 | 0.512166 |
-| Horror Signal Lost | LTGD | 123 | 59,456 | 16,192,256 | 153,278 | 16,404,990 | 0.298924 |
-| Puzzle Magnet Lab | Direct | 174 | 81,739 | 34,328,704 | 239,879 | 34,650,322 | 0.518349 |
-| Puzzle Magnet Lab | LTGD | 138 | 54,618 | 19,223,040 | 188,248 | 19,465,906 | 0.357621 |
-| Ivory Beats (PIB) | Direct | 73 | 53,366 | 8,084,992 | 129,873 | 8,268,231 | 0.220367 |
-| Ivory Beats (PIB) | LTGD | 53 | 39,574 | 4,980,736 | 101,126 | 5,121,436 | 0.163108 |
+| Game | Baseline | LTGD | Total token saving |
+| --- | --- | --- | ---: |
+| Horror Signal Lost | Calls: 171<br>Input: 87,971<br>Cache read: 32,561,280<br>Output: 242,006<br>Total: 32,891,257<br>Cost USD: 0.512166 | Calls: 123<br>Input: 59,456<br>Cache read: 16,192,256<br>Output: 153,278<br>Total: 16,404,990<br>Cost USD: 0.298924 | 50.1% |
+| Puzzle Magnet Lab | Calls: 174<br>Input: 81,739<br>Cache read: 34,328,704<br>Output: 239,879<br>Total: 34,650,322<br>Cost USD: 0.518349 | Calls: 138<br>Input: 54,618<br>Cache read: 19,223,040<br>Output: 188,248<br>Total: 19,465,906<br>Cost USD: 0.357621 | 43.8% |
+| Ivory Beats (PIB) | Calls: 73<br>Input: 53,366<br>Cache read: 8,084,992<br>Output: 129,873<br>Total: 8,268,231<br>Cost USD: 0.220367 | Calls: 53<br>Input: 39,574<br>Cache read: 4,980,736<br>Output: 101,126<br>Total: 5,121,436<br>Cost USD: 0.163108 | 38.1% |
 
-Table 2. Percentage reduction in LTGD relative to the direct run of the same task; positive values mean lower recorded use in LTGD.
+![Figure 3. Baseline and LTGD provider-reported Total Tokens for the three archived games; paired bars show one run per condition, and percentages give the reduction relative to Baseline.](figures/ltgd_total_tokens_2026-09-30.png)
 
-| Game | Calls | Uncached input | Cache read | Output | Total Tokens | Cost USD |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Horror Signal Lost | 28.1% | 32.4% | 50.3% | 36.7% | 50.1% | 41.6% |
-| Puzzle Magnet Lab | 20.7% | 33.2% | 44.0% | 21.5% | 43.8% | 31.0% |
-| Ivory Beats | 27.4% | 25.8% | 38.4% | 22.1% | 38.1% | 26.0% |
+Table 2. Reductions in individual usage components for each game; positive values mean lower recorded use in LTGD. Total token savings appear in Table 1 and Figure 3.
 
-The six rows in Table 1 come from `output/token_usage/{HSL,MAG,PIB}_{direct,LTGD}/usage.json`, including both PIB records. Across the three pairs, the counts sum to 418 versus 314 calls, 75.81 million versus 40.99 million Total Tokens, and USD 1.251 versus 0.820 for Direct versus LTGD. These sums describe the three archived tasks, not an expected saving on a new task. Cache reads account for most counted tokens and had the largest aggregate reduction (46.1%); output tokens fell 27.6%, uncached input fell 31.1%, and estimated cost fell 34.5%. The simultaneous decline in calls and cache reads is consistent with shorter sessions that replayed less accumulated context. The aggregate export cannot show whether this came from failure-triggered planning, different generated actions, task variance, or the earlier controller revision.
+| Game | Calls | Uncached input | Cache read | Output | Cost USD |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Horror Signal Lost | 28.1% | 32.4% | 50.3% | 36.7% | 41.6% |
+| Puzzle Magnet Lab | 20.7% | 33.2% | 44.0% | 21.5% | 31.0% |
+| Ivory Beats | 27.4% | 25.8% | 38.4% | 22.1% | 26.0% |
+
+The three rows in Table 1 cover all six `output/token_usage/{HSL,MAG,PIB}_{direct,LTGD}/usage.json` exports, including both PIB records. Across the three pairs, the counts sum to 418 versus 314 calls, 75.81 million versus 40.99 million Total Tokens, and USD 1.251 versus 0.820 for Baseline versus LTGD. These sums describe the three archived tasks, not an expected saving on a new task. Cache reads account for most counted tokens and had the largest aggregate reduction (46.1%); output tokens fell 27.6%, uncached input fell 31.1%, and estimated cost fell 34.5%. The simultaneous decline in calls and cache reads is consistent with shorter sessions that replayed less accumulated context. The aggregate export cannot show whether this came from failure-triggered planning, different generated actions, task variance, or the earlier controller revision.
 
 ## 5 Limitations
 
