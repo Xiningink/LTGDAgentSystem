@@ -4,7 +4,7 @@ Technical report | Implementation and local evidence as of 30 September 2026
 
 ## Abstract
 
-The LTGD Agent System accepts a natural-language game request in a Pi conversation and lets Pi's native coding agent build a Godot project. A TypeScript extension takes over when the Generator ends its turn: it checks the declared project with Godot, then asks a separate short-context model call to review the original request against the project files. A confirmed engine failure or missing requirement triggers a narrowly scoped Planner response and another Generator turn. The task reaches `done` only after a current Godot pass and a positive requirement review. Twelve repository tests passed in this review, and five of six archived game directories passed a fresh Godot import and headless startup check; the sixth lacked `project.godot`. These checks establish technical behavior of the extension and snapshots, not the playability or quality of the games. Archived usage logs illustrate possible measurement fields but do not support a causal efficiency claim for the current implementation.
+The LTGD Agent System accepts a natural-language game request in a Pi conversation and divides the work among three roles. The Generator writes the Godot project, the Executor runs Godot and reviews the original requirement, and the Planner proposes a focused repair only after a confirmed failure. This division makes verification automatic at the end of a Generator turn and permits `done` only after a current Godot pass and positive requirement review. Twelve repository tests passed, and five of six archived game directories passed a fresh Godot import and headless startup check; the sixth lacked `project.godot`. In three archived one-run task pairs, LTGD logged 38.1% to 50.1% fewer Total Tokens than direct Pi runs. Those sessions used an earlier revision and lack a common gameplay assessment, so the observed differences do not establish a causal efficiency or quality gain for the current implementation.
 
 ## 1 Problem and Scope
 
@@ -24,7 +24,21 @@ After a Godot pass, the Executor issues a separate model request. It supplies th
 
 ![Figure 2. Failure-triggered control flow](figures/ltgd_control_flow_2026-09-30.png)
 
-Any confirmed Godot failure or concrete missing requirement moves the task to `plan`. The Planner receives the latest failure and relevant current source excerpts, then returns either `revise` with focused repair steps or `cannot_resolve_in_project` with a reason and evidence. The Planner cannot edit files. Pi resumes as Generator for the repair; the Executor checks the project again at the next turn boundary. If a repair changes no project file, the extension stops instead of repeating the same check. Infrastructure failures, missing path handoffs, invalid project roots, oversized review input, and model-call failures also stop with a reason. A passing Godot check followed by an `implemented` review records `done`.
+### 2.1 Responsibility and handoff
+
+| Role | Trigger and input | Action and output |
+| --- | --- | --- |
+| Generator | The user's Pi request, or Planner repair steps after a failed check. | Uses Pi's normal coding tools to build the selected Godot project. It ends its turn with the actual project path; on a repair turn it is instructed to change only the confirmed failure. |
+| Executor | Pi's `agent_before_settle` hook after the Generator completes a turn. | Binds the handed-off path, checks structure, imports and starts the game, then makes a separate requirement-review model call. It records the result and routes the task to review, plan, done, or stopped. |
+| Planner | A failed Godot check or a reviewer finding of a concrete missing requirement. | Reads the original goal and latest failure. Engine failures include relevant code excerpts; requirement failures include missing-behavior evidence and a project overview. It returns JSON repair steps or a supported stop decision and does not edit files. |
+
+The controller in `controller.ts` enforces the handoff: Godot `pass` leads to `review`, while `fail` leads to `plan`; a review of `implemented` leads to `done`, while `missing` leads back to `plan`. `index.ts` returns accepted repair steps to the Generator and automatically invokes the Executor after the next turn. If a repair leaves the project fingerprint unchanged, the extension stops rather than repeating the same check. Infrastructure failures, missing path handoffs, invalid project roots, oversized review input, and model-call failures also stop with a reason.
+
+### 2.2 Example trace and intended effect
+
+The repository's integration test supplies a concrete trace with mocked model decisions. An absent main scene fails Godot, so the Planner requests a scene repair. After the scene is added, Godot passes, but the reviewer reports that the requested scanning interaction is missing. The Planner then requests that specific repair; the Generator adds `Game.gd`, and a subsequent Godot pass plus `implemented` review reaches `done`. This test establishes the state transitions, not that a playable scanning game was produced.
+
+The design is intended to spend the Generator's time on implementation, let the Executor decide whether another turn is warranted, and give the Planner only evidence from the latest failure rather than the Generator's full conversation. A direct pass avoids a Planner call. The automatic hook prevents a completed Generator turn from skipping checks, while the requirement review prevents a mere engine startup from ending the task. These are mechanisms visible in the code; their effect on real game quality and Token use requires separate evidence.
 
 ## 3 Evaluation Procedure
 
@@ -42,6 +56,8 @@ The archived usage exports in `output/token_usage/` are a separate historical ob
 
 The five passing projects produced no blocking Godot diagnostic in this recheck. This says the engine could import and start their main scenes for the bounded check. It does not show that menus, controls, win conditions, visuals, or audio met their respective task instructions.
 
+### 4.1 Archived session usage
+
 | Game | Run | Calls | Total Tokens | Output Tokens | Cost USD |
 | --- | --- | ---: | ---: | ---: | ---: |
 | Horror Signal Lost | Direct | 171 | 32,891,257 | 242,006 | 0.512166 |
@@ -51,7 +67,7 @@ The five passing projects produced no blocking Godot diagnostic in this recheck.
 | Ivory Beats | Direct | 73 | 8,268,231 | 129,873 | 0.220367 |
 | Ivory Beats | LTGD | 53 | 5,121,436 | 101,126 | 0.163108 |
 
-The six rows come from `output/token_usage/{HSL,MAG,PIB}_{direct,LTGD}/usage.json`; all sessions used `deepseek-flash`. Total Tokens include uncached input, cache read, cache write, and output; reasoning tokens are already included in output. The archived LTGD sessions have lower logged totals in all three task pairs. The logs do not establish why: each condition has one run, the sessions used an earlier controller revision, and gameplay acceptance was not measured by a common evaluator. These numbers are descriptive records, not results for the current extension version.
+The six rows come from `output/token_usage/{HSL,MAG,PIB}_{direct,LTGD}/usage.json`; all sessions used `deepseek-flash`. Total Tokens include uncached input, cache read, cache write, and output; reasoning tokens are already included in output. Relative to the direct run of the same task, LTGD logged 50.1% fewer Total Tokens for Horror Signal Lost, 43.8% for Puzzle Magnet Lab, and 38.1% for Ivory Beats. The corresponding estimated costs were 41.6%, 31.0%, and 26.0% lower. This pattern is consistent with the intended shorter repair loop, but the logs do not identify the cause: each condition has one run, the sessions used an earlier controller revision, and gameplay acceptance was not measured by a common evaluator. These are descriptive comparisons, not measured effects of the current extension.
 
 ## 5 Limitations
 
@@ -63,16 +79,6 @@ The current `start.cmd` and tests target Windows and a local Godot 4.6.2 console
 
 ## 6 Conclusion
 
-The implemented system makes the handoff from Pi coding to Godot checks automatic and gives confirmed failures a scoped repair loop. Local tests support the controller and launcher behavior; five archived project snapshots passed the current engine smoke check. A credible efficiency or game-quality result needs repeated runs from frozen task inputs and an independent gameplay evaluator.
+LTGD's implemented result is a controlled division of labor: the Generator builds and repairs, the Executor checks the declared artifact and original requirement, and the Planner intervenes only after an observed failure. The automatic handoff and state transitions are supported by 12 passing tests; five archived project snapshots also passed the current engine smoke check. Across three historical task pairs, LTGD sessions logged 38.1% to 50.1% fewer Total Tokens and 26.0% to 41.6% lower estimated cost than direct sessions. This is a consistent descriptive pattern, but the one-run, earlier-revision records cannot establish that the current controller caused it. The strongest supported conclusion is that LTGD implements and exercises a failure-triggered verification and repair workflow; whether it improves completed gameplay or reproducibly reduces cost remains unmeasured.
 
-## Repository Evidence
-
-| Item | Path and use |
-| --- | --- |
-| Extension lifecycle | `LTGDAgentSystem/godot-pat/index.ts` — hooks, path handoff, automatic Executor and Planner calls. |
-| State transitions | `LTGDAgentSystem/godot-pat/controller.ts` — generate, plan, review, done, stopped. |
-| Engine checks | `LTGDAgentSystem/godot-pat/godot.ts` — structure, import, startup, diagnostics. |
-| Requirement review | `LTGDAgentSystem/godot-pat/executor.ts` — source and task-file input, JSON review. |
-| Repair planning | `LTGDAgentSystem/godot-pat/planner.ts` — focused failure input and repair schema. |
-| Tests | `LTGDAgentSystem/tests/godot-pat.test.ts` — twelve checks run for this report. |
-| Archived outputs | `output/game/` and `output/token_usage/` — exploratory snapshots and session exports. |
+Source basis: `LTGDAgentSystem/godot-pat/{index,controller,godot,executor,planner,project}.ts`, `LTGDAgentSystem/tests/godot-pat.test.ts`, `output/game/`, and `output/token_usage/`.

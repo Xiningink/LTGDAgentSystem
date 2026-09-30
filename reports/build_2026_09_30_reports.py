@@ -170,6 +170,8 @@ def add_table(doc, rows, chinese):
             for p in cell.paragraphs:
                 p.paragraph_format.space_after = Pt(0)
                 p.paragraph_format.space_before = Pt(0)
+                if ri == 0:
+                    p.paragraph_format.keep_with_next = True
                 if n == 6 and ri > 0:
                     p.alignment = WD_ALIGN_PARAGRAPH.LEFT if ci == 0 else WD_ALIGN_PARAGRAPH.CENTER if ci == 1 else WD_ALIGN_PARAGRAPH.RIGHT
                 for run in p.runs:
@@ -180,6 +182,10 @@ def add_table(doc, rows, chinese):
         trpr = row._tr.get_or_add_trPr()
         cant = OxmlElement("w:cantSplit")
         trpr.append(cant)
+        if ri == 0:
+            repeat = OxmlElement("w:tblHeader")
+            repeat.set(qn("w:val"), "true")
+            trpr.append(repeat)
     doc.add_paragraph().paragraph_format.space_after = Pt(0)
 
 
